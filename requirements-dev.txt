@@ -1,4 +1,4 @@
 pybind11>=2.13
 numpy>=2.0
 pytest>=8.0
-kaggle-environments>=1.17
+kaggle-environments>=1.29.0
