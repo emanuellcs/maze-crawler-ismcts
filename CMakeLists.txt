@@ -24,7 +24,12 @@ list(APPEND CMAKE_PREFIX_PATH "${PYBIND11_CMAKE_DIR}")
 find_package(pybind11 CONFIG REQUIRED)
 
 pybind11_add_module(crawler_engine
-  src/crawler_engine.cpp
+  src/crawler_engine_belief.cpp
+  src/crawler_engine_engine.cpp
+  src/crawler_engine_internal.cpp
+  src/crawler_engine_policy.cpp
+  src/crawler_engine_sim.cpp
+  src/crawler_engine_state.cpp
   src/bindings.cpp
 )
 

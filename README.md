@@ -10,10 +10,12 @@ The goal of this repository is to keep the Python submission layer thin and move
   - absolute global grid arrays: `20 * 512` cells for walls, crystals, mines, nodes, and belief fields.
   - active 20x20 tactical bitboards backed by `uint64_t[7]`.
   - robot Structure of Arrays storage with fixed capacity and UID slots.
-- `src/crawler_engine.cpp` implements:
-  - deterministic turn stepping in the official rules order.
-  - spawn-before-combat behavior, crush hierarchy, friendly fire, crystal/mine phases, scrolling, and boundary cleanup.
-  - belief-state update, enemy probability diffusion, optimistic hidden-row determinization, and conservative macro/action scaffolding.
+- `src/` is split by engine responsibility:
+  - `crawler_engine_state.cpp` implements fixed-buffer storage, action parsing, board queries, and tactical bitboards.
+  - `crawler_engine_belief.cpp` implements observation merging, enemy probability diffusion, and determinization.
+  - `crawler_engine_sim.cpp` implements deterministic turn stepping, combat, resources, and scrolling.
+  - `crawler_engine_policy.cpp` implements heuristic actions, macro-action generation, and macro-to-primitive translation.
+  - `crawler_engine_internal.cpp` contains shared deterministic helpers for RNG, row generation, scrolling, and wall mutation.
 - `src/bindings.cpp` exposes the engine as a Python module named `crawler_engine`.
 - `main.py` is the Kaggle entrypoint. It maintains one C++ engine per player and returns `{uid: "PRIMITIVE_ACTION"}`.
 - `submission.py` is a local alias for `main.agent`.

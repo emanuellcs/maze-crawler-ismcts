@@ -1,5 +1,8 @@
 #include "crawler_engine.hpp"
 
+// pybind11 bridge between Kaggle's Python observation/action dictionaries and
+// the fixed-buffer C++ engine. Keep policy and simulator rules out of this file.
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -11,6 +14,8 @@ namespace py = pybind11;
 
 namespace {
 
+// Python observations key sparse cells as "col,row"; this helper decodes that
+// form without allocating temporary structured objects in C++.
 bool parse_cell_key(const std::string& key, int& col, int& row) {
     const std::size_t comma = key.find(',');
     if (comma == std::string::npos) {
@@ -25,6 +30,8 @@ bool parse_cell_key(const std::string& key, int& col, int& row) {
     return true;
 }
 
+// Convert Python dict/list observation fields into the fixed-buffer C++ input
+// struct expected by BeliefState and CrawlerSim.
 crawler::ObservationInput make_observation(int player, const py::object& walls_obj, const py::dict& crystals,
                                            const py::dict& robots, const py::dict& mines,
                                            const py::dict& mining_nodes, int south_bound,
@@ -126,6 +133,7 @@ crawler::ObservationInput make_observation(int player, const py::object& walls_o
     return obs;
 }
 
+// Convert fixed-buffer action results back to the Kaggle `{uid: action}` dict.
 py::dict action_result_to_dict(const crawler::ActionResult& result) {
     py::dict out;
     for (int i = 0; i < result.count; ++i) {
@@ -135,6 +143,7 @@ py::dict action_result_to_dict(const crawler::ActionResult& result) {
     return out;
 }
 
+// Small inspection surface for Python smoke tests and debugging.
 py::dict board_summary(const crawler::BoardState& state) {
     py::dict out;
     out["player"] = state.player;
@@ -178,6 +187,8 @@ py::dict board_summary(const crawler::BoardState& state) {
     return out;
 }
 
+// Thin pybind facade. It owns one C++ Engine and translates Python dict actions
+// into simulator-indexed PrimitiveActions.
 class PyEngine {
 public:
     explicit PyEngine(int player = 0) : engine(player) {}
