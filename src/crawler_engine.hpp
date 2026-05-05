@@ -1,11 +1,16 @@
 #pragma once
 
+// Public C++ API for the Maze Crawler engine. Implementation is split across
+// focused modules; this header defines the fixed-buffer contracts they share.
+
 #include <array>
 #include <cstdint>
 #include <string_view>
 
 namespace crawler {
 
+// Fixed game limits and default Kaggle configuration values. These are compile-time
+// constants so simulator state can live in stack/std::array buffers without heap churn.
 constexpr int WIDTH = 20;
 constexpr int HEIGHT = 20;
 constexpr int ACTIVE_CELLS = WIDTH * HEIGHT;
@@ -48,6 +53,7 @@ constexpr int SCROLL_START_INTERVAL = 4;
 constexpr int SCROLL_END_INTERVAL = 1;
 constexpr int SCROLL_RAMP_STEPS = 400;
 
+// Wall bitfield layout used by observations and internal board storage.
 enum WallBits : uint8_t {
     WALL_N = 1,
     WALL_E = 2,
@@ -55,6 +61,7 @@ enum WallBits : uint8_t {
     WALL_W = 8,
 };
 
+// Robot type values intentionally match the Kaggle observation encoding.
 enum RobotType : uint8_t {
     FACTORY = 0,
     SCOUT = 1,
@@ -62,6 +69,7 @@ enum RobotType : uint8_t {
     MINER = 3,
 };
 
+// Canonical direction enum for all movement, wall edit, jump, and transfer helpers.
 enum Direction : uint8_t {
     DIR_NONE = 0,
     DIR_NORTH = 1,
@@ -70,6 +78,7 @@ enum Direction : uint8_t {
     DIR_WEST = 4,
 };
 
+// Primitive action enum maps one-to-one with Kaggle action strings.
 enum Action : uint8_t {
     ACT_IDLE = 0,
     ACT_NORTH,
@@ -98,20 +107,26 @@ enum Action : uint8_t {
     ACT_TRANSFER_WEST,
 };
 
+// Search-level intent labels. ISMCTS should branch over these bounded choices
+// instead of the full primitive Cartesian product.
 enum MacroAction : uint8_t {
     MACRO_IDLE = 0,
+    MACRO_FACTORY_SAFE_ADVANCE,
     MACRO_FACTORY_BUILD_WORKER,
     MACRO_FACTORY_BUILD_SCOUT,
-    MACRO_FACTORY_SAFE_ADVANCE,
-    MACRO_FACTORY_JUMP_NORTH,
-    MACRO_WORKER_OPEN_NORTH,
+    MACRO_FACTORY_BUILD_MINER,
+    MACRO_FACTORY_JUMP_OBSTACLE,
+    MACRO_WORKER_OPEN_NORTH_WALL,
+    MACRO_WORKER_ESCORT_FACTORY,
     MACRO_WORKER_ADVANCE,
+    MACRO_SCOUT_HUNT_CRYSTAL,
     MACRO_SCOUT_EXPLORE_NORTH,
     MACRO_SCOUT_RETURN_ENERGY,
     MACRO_MINER_SEEK_NODE,
     MACRO_MINER_TRANSFORM,
 };
 
+// 20x20 active-window bitboard. Absolute map data is stored separately in BoardState.
 struct BitBoard {
     std::array<uint64_t, ACTIVE_WORDS> words{};
 
@@ -122,8 +137,10 @@ struct BitBoard {
     [[nodiscard]] bool any() const;
 };
 
+// Action and geometry helpers shared by the C++ engine and pybind bridge.
 int pop_lsb(uint64_t& bits);
 const char* action_name(Action action);
+const char* macro_action_name(MacroAction macro);
 Action parse_action(std::string_view value);
 Direction action_direction(Action action);
 uint8_t direction_wall_bit(Direction direction);
@@ -135,6 +152,8 @@ int max_energy(uint8_t type);
 int vision_range(uint8_t type);
 bool is_fixed_wall(int col, Direction direction);
 
+// Structure-of-arrays robot storage. Dead slots are recycled; indices remain the
+// simulator-local handle used by PrimitiveActions during a step.
 struct RobotStore {
     std::array<std::array<char, UID_LEN>, MAX_ROBOTS> uid{};
     std::array<uint8_t, MAX_ROBOTS> alive{};
@@ -158,6 +177,8 @@ struct RobotStore {
     void remove(int index);
 };
 
+// Full deterministic simulator state. Cell arrays are indexed by absolute
+// `row * WIDTH + col`, while bitboards index only the current active window.
 struct BoardState {
     int player = 0;
     int step = 0;
@@ -197,6 +218,7 @@ struct BoardState {
     void rebuild_active_bitboards();
 };
 
+// Decoded observation robot record before it is merged into belief/simulation state.
 struct RobotObservation {
     std::array<char, UID_LEN> uid{};
     int type = 0;
@@ -209,12 +231,14 @@ struct RobotObservation {
     int build_cd = 0;
 };
 
+// Sparse observation record for crystal energy keyed by cell.
 struct CellEnergyObservation {
     int col = 0;
     int row = 0;
     int energy = 0;
 };
 
+// Sparse observation record for mines, which are remembered once discovered.
 struct MineObservation {
     int col = 0;
     int row = 0;
@@ -223,11 +247,14 @@ struct MineObservation {
     int owner = -1;
 };
 
+// Sparse observation record for mining nodes.
 struct CellObservation {
     int col = 0;
     int row = 0;
 };
 
+// Fixed-buffer decoded Python observation. The pybind layer fills this before
+// handing control to the deterministic C++ engine.
 struct ObservationInput {
     int player = 0;
     int south_bound = 0;
@@ -244,12 +271,14 @@ struct ObservationInput {
     std::array<CellObservation, MAX_OBS_NODES> mining_nodes{};
 };
 
+// Primitive action buffer addressed by simulator robot index.
 struct PrimitiveActions {
     std::array<Action, MAX_ROBOTS> actions{};
 
     void clear();
 };
 
+// Kaggle-compatible action output before conversion back to a Python dict.
 struct ActionResult {
     int count = 0;
     std::array<std::array<char, UID_LEN>, MAX_ROBOTS> uid{};
@@ -259,11 +288,15 @@ struct ActionResult {
     void add(std::string_view uid_value, Action primitive);
 };
 
+// Bounded macro list for one robot. The generator never allocates and never
+// returns more than MAX_MACROS entries.
 struct MacroList {
     int count = 0;
     std::array<MacroAction, MAX_MACROS> macros{};
 };
 
+// Player-centric belief state. Visible facts overwrite belief; hidden enemies are
+// represented as lightweight per-type probability fields for determinization.
 struct BeliefState {
     int player = 0;
     int turn = 0;
@@ -284,6 +317,8 @@ struct BeliefState {
     [[nodiscard]] BoardState determinize(uint64_t seed) const;
 };
 
+// Deterministic rules simulator. `step()` is the hot path and is written against
+// fixed-size scratch buffers only.
 class CrawlerSim {
 public:
     BoardState state{};
@@ -293,8 +328,11 @@ public:
     void step(const PrimitiveActions& actions);
     [[nodiscard]] Action heuristic_action_for(int robot_index) const;
     [[nodiscard]] MacroList generate_macros_for(int robot_index) const;
+    [[nodiscard]] Action primitive_for_macro(int robot_index, MacroAction macro) const;
 };
 
+// High-level facade used by Python. It owns belief plus the latest concrete
+// simulation snapshot and exposes action selection.
 class Engine {
 public:
     BeliefState belief{};
