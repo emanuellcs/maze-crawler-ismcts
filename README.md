@@ -349,6 +349,32 @@ Current test coverage includes:
 - Fixed center-wall edit no-op behavior.
 - Off-board jump destruction.
 
+## CI/CD
+
+GitHub Actions workflow configuration is stored in `.github/workflows/ci.yml`.
+
+The workflow runs on:
+
+- Pull requests.
+- Pushes to `main` or `master`.
+- Version tags matching `v*`.
+- Manual `workflow_dispatch` runs.
+
+The CI job:
+
+- Sets up Python 3.11 and 3.12 on Ubuntu.
+- Installs `requirements-dev.txt`.
+- Configures CMake against the active Python interpreter.
+- Builds the `crawler_engine` extension in release mode.
+- Runs `test.py`.
+- Runs `pytest`.
+- Verifies that `main.agent` imports and returns a Kaggle-compatible action dict.
+- Uploads the compiled extension and `compile_commands.json` as artifacts.
+
+The packaging job creates a source tarball artifact after successful CI. On
+version tags, the release job bundles all workflow artifacts and publishes them
+to the GitHub Release for that tag.
+
 ## Local Agent Smoke Run
 
 After building the extension, the Python entrypoint can be exercised directly:
