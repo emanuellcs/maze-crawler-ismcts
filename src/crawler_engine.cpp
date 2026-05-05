@@ -321,6 +321,160 @@ Action best_passable_direction(const BoardState& state, int robot_index) {
     return ACT_IDLE;
 }
 
+bool can_pay_after_drain(int energy, int cost) {
+    return energy >= cost + ENERGY_PER_TURN;
+}
+
+bool ready_after_tick(int cooldown) {
+    return cooldown <= 1;
+}
+
+Action movement_action(Direction direction) {
+    switch (direction) {
+        case DIR_NORTH: return ACT_NORTH;
+        case DIR_SOUTH: return ACT_SOUTH;
+        case DIR_EAST: return ACT_EAST;
+        case DIR_WEST: return ACT_WEST;
+        default: return ACT_IDLE;
+    }
+}
+
+Action transfer_action(Direction direction) {
+    switch (direction) {
+        case DIR_NORTH: return ACT_TRANSFER_NORTH;
+        case DIR_SOUTH: return ACT_TRANSFER_SOUTH;
+        case DIR_EAST: return ACT_TRANSFER_EAST;
+        case DIR_WEST: return ACT_TRANSFER_WEST;
+        default: return ACT_IDLE;
+    }
+}
+
+bool can_step_in_active(const BoardState& state, int c, int r, Direction direction) {
+    const int nc = c + direction_dc(direction);
+    const int nr = r + direction_dr(direction);
+    return state.in_active(nc, nr) && state.can_move_through(c, r, direction);
+}
+
+Action step_toward_cell(const BoardState& state, int robot_index, int target_c, int target_r) {
+    const int c = state.robots.col[static_cast<size_t>(robot_index)];
+    const int r = state.robots.row[static_cast<size_t>(robot_index)];
+    std::array<Direction, 4> candidates{DIR_NONE, DIR_NONE, DIR_NONE, DIR_NONE};
+    int count = 0;
+
+    const int dc = target_c - c;
+    const int dr = target_r - r;
+    if (std::abs(dr) >= std::abs(dc)) {
+        if (dr > 0) candidates[static_cast<size_t>(count++)] = DIR_NORTH;
+        if (dr < 0) candidates[static_cast<size_t>(count++)] = DIR_SOUTH;
+        if (dc > 0) candidates[static_cast<size_t>(count++)] = DIR_EAST;
+        if (dc < 0) candidates[static_cast<size_t>(count++)] = DIR_WEST;
+    } else {
+        if (dc > 0) candidates[static_cast<size_t>(count++)] = DIR_EAST;
+        if (dc < 0) candidates[static_cast<size_t>(count++)] = DIR_WEST;
+        if (dr > 0) candidates[static_cast<size_t>(count++)] = DIR_NORTH;
+        if (dr < 0) candidates[static_cast<size_t>(count++)] = DIR_SOUTH;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const Direction d = candidates[static_cast<size_t>(i)];
+        if (can_step_in_active(state, c, r, d)) {
+            return movement_action(d);
+        }
+    }
+    return best_passable_direction(state, robot_index);
+}
+
+int nearest_friendly_factory(const BoardState& state, int robot_index) {
+    const int c = state.robots.col[static_cast<size_t>(robot_index)];
+    const int r = state.robots.row[static_cast<size_t>(robot_index)];
+    const int owner = state.robots.owner[static_cast<size_t>(robot_index)];
+    int best = -1;
+    int best_dist = std::numeric_limits<int>::max();
+    for (int i = 0; i < state.robots.used; ++i) {
+        if (i == robot_index || state.robots.alive[static_cast<size_t>(i)] == 0 ||
+            state.robots.owner[static_cast<size_t>(i)] != owner ||
+            state.robots.type[static_cast<size_t>(i)] != FACTORY) {
+            continue;
+        }
+        const int dist = std::abs(c - state.robots.col[static_cast<size_t>(i)]) +
+                         std::abs(r - state.robots.row[static_cast<size_t>(i)]);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best = i;
+        }
+    }
+    return best;
+}
+
+Action transfer_to_adjacent_factory(const BoardState& state, int robot_index) {
+    const int factory = nearest_friendly_factory(state, robot_index);
+    if (factory < 0) {
+        return ACT_IDLE;
+    }
+    const int c = state.robots.col[static_cast<size_t>(robot_index)];
+    const int r = state.robots.row[static_cast<size_t>(robot_index)];
+    const int fc = state.robots.col[static_cast<size_t>(factory)];
+    const int fr = state.robots.row[static_cast<size_t>(factory)];
+    Direction d = DIR_NONE;
+    if (fc == c && fr == r + 1) d = DIR_NORTH;
+    if (fc == c && fr == r - 1) d = DIR_SOUTH;
+    if (fc == c + 1 && fr == r) d = DIR_EAST;
+    if (fc == c - 1 && fr == r) d = DIR_WEST;
+    if (d != DIR_NONE && state.can_move_through(c, r, d)) {
+        return transfer_action(d);
+    }
+    return ACT_IDLE;
+}
+
+int nearest_crystal_cell(const BoardState& state, int robot_index) {
+    const int c = state.robots.col[static_cast<size_t>(robot_index)];
+    const int r = state.robots.row[static_cast<size_t>(robot_index)];
+    int best_idx = -1;
+    int best_dist = std::numeric_limits<int>::max();
+    for (int rr = state.south_bound; rr <= state.north_bound; ++rr) {
+        for (int cc = 0; cc < WIDTH; ++cc) {
+            const int idx = state.abs_index(cc, rr);
+            if (idx < 0 || state.crystal_energy[static_cast<size_t>(idx)] <= 0) {
+                continue;
+            }
+            const int dist = std::abs(c - cc) + std::abs(r - rr);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = idx;
+            }
+        }
+    }
+    return best_idx;
+}
+
+int nearest_mining_node_cell(const BoardState& state, int robot_index) {
+    const int c = state.robots.col[static_cast<size_t>(robot_index)];
+    const int r = state.robots.row[static_cast<size_t>(robot_index)];
+    int best_idx = -1;
+    int best_dist = std::numeric_limits<int>::max();
+    for (int rr = state.south_bound; rr <= state.north_bound; ++rr) {
+        for (int cc = 0; cc < WIDTH; ++cc) {
+            const int idx = state.abs_index(cc, rr);
+            if (idx < 0 || state.mining_node[static_cast<size_t>(idx)] == 0) {
+                continue;
+            }
+            const int dist = std::abs(c - cc) + std::abs(r - rr);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = idx;
+            }
+        }
+    }
+    return best_idx;
+}
+
+void add_macro(MacroList& list, MacroAction macro) {
+    if (list.count >= MAX_MACROS) {
+        return;
+    }
+    list.macros[static_cast<size_t>(list.count++)] = macro;
+}
+
 }  // namespace
 
 void BitBoard::clear() {
@@ -390,6 +544,26 @@ const char* action_name(Action action) {
         case ACT_TRANSFER_EAST: return "TRANSFER_EAST";
         case ACT_TRANSFER_WEST: return "TRANSFER_WEST";
         case ACT_IDLE:
+        default: return "IDLE";
+    }
+}
+
+const char* macro_action_name(MacroAction macro) {
+    switch (macro) {
+        case MACRO_FACTORY_SAFE_ADVANCE: return "FACTORY_SAFE_ADVANCE";
+        case MACRO_FACTORY_BUILD_WORKER: return "FACTORY_BUILD_WORKER";
+        case MACRO_FACTORY_BUILD_SCOUT: return "FACTORY_BUILD_SCOUT";
+        case MACRO_FACTORY_BUILD_MINER: return "FACTORY_BUILD_MINER";
+        case MACRO_FACTORY_JUMP_OBSTACLE: return "FACTORY_JUMP_OBSTACLE";
+        case MACRO_WORKER_OPEN_NORTH_WALL: return "WORKER_OPEN_NORTH_WALL";
+        case MACRO_WORKER_ESCORT_FACTORY: return "WORKER_ESCORT_FACTORY";
+        case MACRO_WORKER_ADVANCE: return "WORKER_ADVANCE";
+        case MACRO_SCOUT_HUNT_CRYSTAL: return "SCOUT_HUNT_CRYSTAL";
+        case MACRO_SCOUT_EXPLORE_NORTH: return "SCOUT_EXPLORE_NORTH";
+        case MACRO_SCOUT_RETURN_ENERGY: return "SCOUT_RETURN_ENERGY";
+        case MACRO_MINER_SEEK_NODE: return "MINER_SEEK_NODE";
+        case MACRO_MINER_TRANSFORM: return "MINER_TRANSFORM";
+        case MACRO_IDLE:
         default: return "IDLE";
     }
 }
@@ -592,7 +766,7 @@ int RobotStore::add_generated_robot(uint32_t serial, uint8_t robot_type, uint8_t
     std::array<char, UID_LEN> generated{};
     std::snprintf(generated.data(), generated.size(), "sim-%u", serial);
     return add_robot(generated.data(), robot_type, robot_owner, robot_col, robot_row, robot_energy,
-                     move_period(robot_type) - 1, 0, 0);
+                     move_period(robot_type), 0, 0);
 }
 
 void RobotStore::remove(int index) {
@@ -1154,11 +1328,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
         const int cap = max_energy(state.robots.type[static_cast<size_t>(target)]);
         const int space = std::max(0, cap - state.robots.energy[static_cast<size_t>(target)]);
-        const int amount = std::min<int>(state.robots.energy[static_cast<size_t>(i)], space);
+        const int source_energy = state.robots.energy[static_cast<size_t>(i)];
+        const int amount = std::min<int>(source_energy, space);
         state.robots.energy[static_cast<size_t>(target)] =
             static_cast<int16_t>(state.robots.energy[static_cast<size_t>(target)] + amount);
-        state.robots.energy[static_cast<size_t>(i)] =
-            static_cast<int16_t>(state.robots.energy[static_cast<size_t>(i)] - amount);
+        state.robots.energy[static_cast<size_t>(i)] = 0;
     }
 
     for (int i = 0; i < state.robots.used; ++i) {
@@ -1210,6 +1384,8 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
             const int tc = state.robots.col[static_cast<size_t>(i)] + direction_dc(d) * 2;
             const int tr = state.robots.row[static_cast<size_t>(i)] + direction_dr(d) * 2;
             state.robots.jump_cd[static_cast<size_t>(i)] = FACTORY_JUMP_COOLDOWN;
+            state.robots.move_cd[static_cast<size_t>(i)] =
+                static_cast<int16_t>(move_period(state.robots.type[static_cast<size_t>(i)]));
             if (tc >= 0 && tc < WIDTH && tr >= state.south_bound && tr <= state.north_bound) {
                 target_abs[static_cast<size_t>(i)] = static_cast<int16_t>(state.abs_index(tc, tr));
             } else {
@@ -1291,7 +1467,8 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
                 const uint8_t t = state.robots.type[static_cast<size_t>(u)];
                 bool dies = false;
                 if (t == FACTORY) {
-                    dies = (factory_owner_mask & 0b11) == 0b11;
+                    dies = type_count[static_cast<size_t>(FACTORY)] > 1 ||
+                           (factory_owner_mask & 0b11) == 0b11;
                 } else if (type_count[static_cast<size_t>(t)] > 1) {
                     dies = true;
                 } else {
@@ -1326,7 +1503,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         state.robots.col[static_cast<size_t>(i)] = static_cast<int16_t>(cell_col(idx));
         state.robots.row[static_cast<size_t>(i)] = static_cast<int16_t>(cell_row(idx));
         state.robots.move_cd[static_cast<size_t>(i)] =
-            static_cast<int16_t>(move_period(state.robots.type[static_cast<size_t>(i)]) - 1);
+            static_cast<int16_t>(move_period(state.robots.type[static_cast<size_t>(i)]));
     }
 
     for (int i = 0; i < state.robots.used; ++i) {
@@ -1451,15 +1628,17 @@ Action CrawlerSim::heuristic_action_for(int robot_index) const {
                 scouts += state.robots.type[static_cast<size_t>(i)] == SCOUT ? 1 : 0;
             }
         }
-        if ((wall & WALL_N) != 0 && state.robots.jump_cd[static_cast<size_t>(robot_index)] == 0) {
+        if ((wall & WALL_N) != 0 &&
+            ready_after_tick(state.robots.jump_cd[static_cast<size_t>(robot_index)]) &&
+            ready_after_tick(state.robots.move_cd[static_cast<size_t>(robot_index)])) {
             return ACT_JUMP_NORTH;
         }
-        if (state.robots.build_cd[static_cast<size_t>(robot_index)] == 0 &&
+        if (ready_after_tick(state.robots.build_cd[static_cast<size_t>(robot_index)]) &&
             state.can_move_through(c, r, DIR_NORTH)) {
-            if (workers < 2 && e > WORKER_COST + ENERGY_PER_TURN) {
+            if (workers < 2 && can_pay_after_drain(e, WORKER_COST)) {
                 return ACT_BUILD_WORKER;
             }
-            if (scouts < 3 && e > SCOUT_COST + ENERGY_PER_TURN) {
+            if (scouts < 3 && can_pay_after_drain(e, SCOUT_COST)) {
                 return ACT_BUILD_SCOUT;
             }
         }
@@ -1467,7 +1646,7 @@ Action CrawlerSim::heuristic_action_for(int robot_index) const {
     }
 
     if (type == WORKER) {
-        if ((wall & WALL_N) != 0 && e > WALL_REMOVE_COST + ENERGY_PER_TURN) {
+        if ((wall & WALL_N) != 0 && can_pay_after_drain(e, WALL_REMOVE_COST)) {
             return ACT_REMOVE_NORTH;
         }
         return best_passable_direction(state, robot_index);
@@ -1475,7 +1654,7 @@ Action CrawlerSim::heuristic_action_for(int robot_index) const {
 
     if (type == MINER) {
         const int idx = state.abs_index(c, r);
-        if (idx >= 0 && state.mining_node[static_cast<size_t>(idx)] != 0 && e > TRANSFORM_COST + ENERGY_PER_TURN) {
+        if (idx >= 0 && state.mining_node[static_cast<size_t>(idx)] != 0 && can_pay_after_drain(e, TRANSFORM_COST)) {
             return ACT_TRANSFORM;
         }
         return best_passable_direction(state, robot_index);
@@ -1491,23 +1670,165 @@ MacroList CrawlerSim::generate_macros_for(int robot_index) const {
         return list;
     }
     const uint8_t type = state.robots.type[static_cast<size_t>(robot_index)];
-    list.macros[static_cast<size_t>(list.count++)] = MACRO_IDLE;
+    add_macro(list, MACRO_IDLE);
     if (type == FACTORY) {
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_FACTORY_SAFE_ADVANCE;
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_FACTORY_BUILD_WORKER;
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_FACTORY_BUILD_SCOUT;
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_FACTORY_JUMP_NORTH;
+        add_macro(list, MACRO_FACTORY_SAFE_ADVANCE);
+        add_macro(list, MACRO_FACTORY_BUILD_WORKER);
+        add_macro(list, MACRO_FACTORY_BUILD_SCOUT);
+        add_macro(list, MACRO_FACTORY_BUILD_MINER);
+        add_macro(list, MACRO_FACTORY_JUMP_OBSTACLE);
     } else if (type == WORKER) {
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_WORKER_OPEN_NORTH;
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_WORKER_ADVANCE;
+        add_macro(list, MACRO_WORKER_OPEN_NORTH_WALL);
+        add_macro(list, MACRO_WORKER_ESCORT_FACTORY);
+        add_macro(list, MACRO_WORKER_ADVANCE);
     } else if (type == SCOUT) {
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_SCOUT_EXPLORE_NORTH;
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_SCOUT_RETURN_ENERGY;
+        add_macro(list, MACRO_SCOUT_HUNT_CRYSTAL);
+        add_macro(list, MACRO_SCOUT_EXPLORE_NORTH);
+        add_macro(list, MACRO_SCOUT_RETURN_ENERGY);
     } else if (type == MINER) {
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_MINER_SEEK_NODE;
-        list.macros[static_cast<size_t>(list.count++)] = MACRO_MINER_TRANSFORM;
+        add_macro(list, MACRO_MINER_SEEK_NODE);
+        add_macro(list, MACRO_MINER_TRANSFORM);
     }
     return list;
+}
+
+Action CrawlerSim::primitive_for_macro(int robot_index, MacroAction macro) const {
+    if (robot_index < 0 || robot_index >= state.robots.used ||
+        state.robots.alive[static_cast<size_t>(robot_index)] == 0) {
+        return ACT_IDLE;
+    }
+
+    const uint8_t type = state.robots.type[static_cast<size_t>(robot_index)];
+    const int c = state.robots.col[static_cast<size_t>(robot_index)];
+    const int r = state.robots.row[static_cast<size_t>(robot_index)];
+    const int e = state.robots.energy[static_cast<size_t>(robot_index)];
+    const uint8_t wall = state.wall_at(c, r);
+
+    switch (macro) {
+        case MACRO_FACTORY_BUILD_WORKER:
+            if (type == FACTORY && ready_after_tick(state.robots.build_cd[static_cast<size_t>(robot_index)]) &&
+                can_pay_after_drain(e, WORKER_COST) && r + 1 <= state.north_bound &&
+                state.can_move_through(c, r, DIR_NORTH)) {
+                return ACT_BUILD_WORKER;
+            }
+            break;
+        case MACRO_FACTORY_BUILD_SCOUT:
+            if (type == FACTORY && ready_after_tick(state.robots.build_cd[static_cast<size_t>(robot_index)]) &&
+                can_pay_after_drain(e, SCOUT_COST) && r + 1 <= state.north_bound &&
+                state.can_move_through(c, r, DIR_NORTH)) {
+                return ACT_BUILD_SCOUT;
+            }
+            break;
+        case MACRO_FACTORY_BUILD_MINER:
+            if (type == FACTORY && ready_after_tick(state.robots.build_cd[static_cast<size_t>(robot_index)]) &&
+                can_pay_after_drain(e, MINER_COST) && r + 1 <= state.north_bound &&
+                state.can_move_through(c, r, DIR_NORTH)) {
+                return ACT_BUILD_MINER;
+            }
+            break;
+        case MACRO_FACTORY_JUMP_OBSTACLE:
+            if (type == FACTORY && ready_after_tick(state.robots.jump_cd[static_cast<size_t>(robot_index)]) &&
+                ready_after_tick(state.robots.move_cd[static_cast<size_t>(robot_index)]) &&
+                (wall & WALL_N) != 0 && r + 2 <= state.north_bound) {
+                return ACT_JUMP_NORTH;
+            }
+            break;
+        case MACRO_FACTORY_SAFE_ADVANCE:
+            if (type == FACTORY) {
+                if ((wall & WALL_N) != 0 &&
+                    ready_after_tick(state.robots.jump_cd[static_cast<size_t>(robot_index)]) &&
+                    ready_after_tick(state.robots.move_cd[static_cast<size_t>(robot_index)]) &&
+                    r + 2 <= state.north_bound) {
+                    return ACT_JUMP_NORTH;
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_WORKER_OPEN_NORTH_WALL:
+            if (type == WORKER && (wall & WALL_N) != 0 && can_pay_after_drain(e, WALL_REMOVE_COST)) {
+                return ACT_REMOVE_NORTH;
+            }
+            break;
+        case MACRO_WORKER_ESCORT_FACTORY:
+            if (type == WORKER) {
+                const int factory = nearest_friendly_factory(state, robot_index);
+                if (factory >= 0) {
+                    return step_toward_cell(state, robot_index,
+                                            state.robots.col[static_cast<size_t>(factory)],
+                                            state.robots.row[static_cast<size_t>(factory)]);
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_WORKER_ADVANCE:
+            if (type == WORKER) {
+                if ((wall & WALL_N) != 0 && can_pay_after_drain(e, WALL_REMOVE_COST)) {
+                    return ACT_REMOVE_NORTH;
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_SCOUT_HUNT_CRYSTAL:
+            if (type == SCOUT) {
+                const int idx = nearest_crystal_cell(state, robot_index);
+                if (idx >= 0) {
+                    return step_toward_cell(state, robot_index, cell_col(idx), cell_row(idx));
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_SCOUT_EXPLORE_NORTH:
+            if (type == SCOUT) {
+                if (can_step_in_active(state, c, r, DIR_NORTH)) {
+                    return ACT_NORTH;
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_SCOUT_RETURN_ENERGY:
+            if (type == SCOUT) {
+                const Action transfer = transfer_to_adjacent_factory(state, robot_index);
+                if (transfer != ACT_IDLE) {
+                    return transfer;
+                }
+                const int factory = nearest_friendly_factory(state, robot_index);
+                if (factory >= 0) {
+                    return step_toward_cell(state, robot_index,
+                                            state.robots.col[static_cast<size_t>(factory)],
+                                            state.robots.row[static_cast<size_t>(factory)]);
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_MINER_SEEK_NODE:
+            if (type == MINER) {
+                const int here = state.abs_index(c, r);
+                if (here >= 0 && state.mining_node[static_cast<size_t>(here)] != 0 &&
+                    can_pay_after_drain(e, TRANSFORM_COST)) {
+                    return ACT_TRANSFORM;
+                }
+                const int idx = nearest_mining_node_cell(state, robot_index);
+                if (idx >= 0) {
+                    return step_toward_cell(state, robot_index, cell_col(idx), cell_row(idx));
+                }
+                return best_passable_direction(state, robot_index);
+            }
+            break;
+        case MACRO_MINER_TRANSFORM:
+            if (type == MINER) {
+                const int idx = state.abs_index(c, r);
+                if (idx >= 0 && state.mining_node[static_cast<size_t>(idx)] != 0 &&
+                    can_pay_after_drain(e, TRANSFORM_COST)) {
+                    return ACT_TRANSFORM;
+                }
+            }
+            break;
+        case MACRO_IDLE:
+        default:
+            break;
+    }
+
+    return ACT_IDLE;
 }
 
 Engine::Engine() {

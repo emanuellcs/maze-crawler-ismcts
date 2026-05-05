@@ -242,4 +242,7 @@ PYBIND11_MODULE(crawler_engine, m) {
     m.def("action_name", [](int action) {
         return std::string(crawler::action_name(static_cast<crawler::Action>(action)));
     });
+    m.def("macro_action_name", [](int macro) {
+        return std::string(crawler::macro_action_name(static_cast<crawler::MacroAction>(macro)));
+    });
 }

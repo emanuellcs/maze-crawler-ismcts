@@ -100,12 +100,15 @@ enum Action : uint8_t {
 
 enum MacroAction : uint8_t {
     MACRO_IDLE = 0,
+    MACRO_FACTORY_SAFE_ADVANCE,
     MACRO_FACTORY_BUILD_WORKER,
     MACRO_FACTORY_BUILD_SCOUT,
-    MACRO_FACTORY_SAFE_ADVANCE,
-    MACRO_FACTORY_JUMP_NORTH,
-    MACRO_WORKER_OPEN_NORTH,
+    MACRO_FACTORY_BUILD_MINER,
+    MACRO_FACTORY_JUMP_OBSTACLE,
+    MACRO_WORKER_OPEN_NORTH_WALL,
+    MACRO_WORKER_ESCORT_FACTORY,
     MACRO_WORKER_ADVANCE,
+    MACRO_SCOUT_HUNT_CRYSTAL,
     MACRO_SCOUT_EXPLORE_NORTH,
     MACRO_SCOUT_RETURN_ENERGY,
     MACRO_MINER_SEEK_NODE,
@@ -124,6 +127,7 @@ struct BitBoard {
 
 int pop_lsb(uint64_t& bits);
 const char* action_name(Action action);
+const char* macro_action_name(MacroAction macro);
 Action parse_action(std::string_view value);
 Direction action_direction(Action action);
 uint8_t direction_wall_bit(Direction direction);
@@ -293,6 +297,7 @@ public:
     void step(const PrimitiveActions& actions);
     [[nodiscard]] Action heuristic_action_for(int robot_index) const;
     [[nodiscard]] MacroList generate_macros_for(int robot_index) const;
+    [[nodiscard]] Action primitive_for_macro(int robot_index, MacroAction macro) const;
 };
 
 class Engine {
