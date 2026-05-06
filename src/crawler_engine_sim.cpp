@@ -13,7 +13,7 @@ namespace {
 
 void compute_rewards(BoardState& state) {
     int factory_count[2] = {0, 0};
-    int energy[2] = {0, 0};
+    int64_t energy[2] = {0, 0};
     int units[2] = {0, 0};
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
@@ -77,6 +77,14 @@ void compute_rewards(BoardState& state) {
     }
 }
 
+int energy_space_for_robot(const BoardState& state, int robot_index) {
+    const int energy = state.robots.energy[static_cast<size_t>(robot_index)];
+    if (state.robots.type[static_cast<size_t>(robot_index)] == FACTORY) {
+        return std::max(0, std::numeric_limits<int32_t>::max() - energy);
+    }
+    return std::max(0, max_energy(state.robots.type[static_cast<size_t>(robot_index)]) - energy);
+}
+
 }  // namespace
 
 void CrawlerSim::reset() {
@@ -85,14 +93,13 @@ void CrawlerSim::reset() {
 
 void CrawlerSim::load_from_observation(const ObservationInput& obs, const BeliefState& belief) {
     const int prior_step = state.step;
-    const int prior_scroll = state.scroll_counter;
     const uint32_t prior_uid = state.next_generated_uid;
     state.reset();
     state.player = obs.player;
     state.south_bound = obs.south_bound;
     state.north_bound = obs.north_bound;
     state.step = obs.step >= 0 ? obs.step : prior_step + 1;
-    state.scroll_counter = prior_scroll > 0 ? prior_scroll : detail::scroll_interval(state.step);
+    state.scroll_counter = detail::scroll_counter_at_step(state.step);
     state.next_generated_uid = prior_uid == 0 ? 1 : prior_uid;
     state.wall_known = belief.known_wall;
     state.walls = belief.wall;
@@ -193,7 +200,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
             continue;
         }
         state.robots.energy[static_cast<size_t>(i)] =
-            static_cast<int16_t>(std::max(0, state.robots.energy[static_cast<size_t>(i)] - ENERGY_PER_TURN));
+            std::max(0, state.robots.energy[static_cast<size_t>(i)] - ENERGY_PER_TURN);
         if (state.robots.energy[static_cast<size_t>(i)] == 0) {
             actions[static_cast<size_t>(i)] = ACT_IDLE;
         }
@@ -236,8 +243,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
             actions[static_cast<size_t>(i)] = ACT_IDLE;
             continue;
         }
-        state.robots.energy[static_cast<size_t>(i)] =
-            static_cast<int16_t>(state.robots.energy[static_cast<size_t>(i)] - cost);
+        state.robots.energy[static_cast<size_t>(i)] = state.robots.energy[static_cast<size_t>(i)] - cost;
         const Direction d = action_direction(a);
         const int c = state.robots.col[static_cast<size_t>(i)];
         const int r = state.robots.row[static_cast<size_t>(i)];
@@ -276,8 +282,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
             actions[static_cast<size_t>(i)] = ACT_IDLE;
             continue;
         }
-        state.robots.energy[static_cast<size_t>(i)] =
-            static_cast<int16_t>(state.robots.energy[static_cast<size_t>(i)] - cost);
+        state.robots.energy[static_cast<size_t>(i)] = state.robots.energy[static_cast<size_t>(i)] - cost;
         state.robots.build_cd[static_cast<size_t>(i)] = FACTORY_BUILD_COOLDOWN;
         const int slot = state.robots.add_generated_robot(state.next_generated_uid++, new_type,
                                                           state.robots.owner[static_cast<size_t>(i)],
@@ -318,12 +323,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         if (target < 0) {
             continue;
         }
-        const int cap = max_energy(state.robots.type[static_cast<size_t>(target)]);
-        const int space = std::max(0, cap - state.robots.energy[static_cast<size_t>(target)]);
+        const int space = energy_space_for_robot(state, target);
         const int source_energy = state.robots.energy[static_cast<size_t>(i)];
         const int amount = std::min<int>(source_energy, space);
         state.robots.energy[static_cast<size_t>(target)] =
-            static_cast<int16_t>(state.robots.energy[static_cast<size_t>(target)] + amount);
+            state.robots.energy[static_cast<size_t>(target)] + amount;
         state.robots.energy[static_cast<size_t>(i)] = 0;
     }
 
@@ -532,11 +536,10 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         const int idx = state.abs_index(state.robots.col[static_cast<size_t>(i)],
                                         state.robots.row[static_cast<size_t>(i)]);
         if (idx >= 0 && state.crystal_energy[static_cast<size_t>(idx)] > 0) {
-            const int cap = max_energy(state.robots.type[static_cast<size_t>(i)]);
             const int gain = std::min<int>(state.crystal_energy[static_cast<size_t>(idx)],
-                                           std::max(0, cap - state.robots.energy[static_cast<size_t>(i)]));
+                                           energy_space_for_robot(state, i));
             state.robots.energy[static_cast<size_t>(i)] =
-                static_cast<int16_t>(state.robots.energy[static_cast<size_t>(i)] + gain);
+                state.robots.energy[static_cast<size_t>(i)] + gain;
             state.crystal_energy[static_cast<size_t>(idx)] = 0;
         }
     }
@@ -552,11 +555,10 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
             state.mine_owner[static_cast<size_t>(idx)] != state.robots.owner[static_cast<size_t>(i)]) {
             continue;
         }
-        const int cap = max_energy(state.robots.type[static_cast<size_t>(i)]);
         const int transfer = std::min<int>(state.mine_energy[static_cast<size_t>(idx)],
-                                           std::max(0, cap - state.robots.energy[static_cast<size_t>(i)]));
+                                           energy_space_for_robot(state, i));
         state.robots.energy[static_cast<size_t>(i)] =
-            static_cast<int16_t>(state.robots.energy[static_cast<size_t>(i)] + transfer);
+            state.robots.energy[static_cast<size_t>(i)] + transfer;
         state.mine_energy[static_cast<size_t>(idx)] =
             static_cast<int16_t>(state.mine_energy[static_cast<size_t>(idx)] - transfer);
     }

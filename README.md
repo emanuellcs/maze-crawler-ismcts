@@ -1,184 +1,177 @@
 # Maze Crawler ISMCTS
 
-This repository contains an ahead-of-time C++ inference engine for Kaggle's
-Maze Crawler competition, exposed to Python through `pybind11`. The project is
-structured to keep the Kaggle `main.py` entrypoint thin while moving simulator
-state, deterministic rollouts, belief updates, and future ISMCTS search into
-compiled code.
+This repository contains a C++20 agent core for Kaggle Maze Crawler, exposed to Kaggle through a thin Python `main.py` entrypoint. The engine is built around a deterministic fixed-buffer simulator, a player-centric belief model, and a zero-allocation Information Set Monte Carlo Tree Search (ISMCTS) over bounded joint macro actions.
 
-The current implementation is a working engine scaffold. It builds as a Python
-extension module named `crawler_engine`, ingests Kaggle-style observations,
-executes rule-focused simulator steps, and returns Kaggle-compatible primitive
-actions.
-
-## Goals
-
-- Provide a deterministic C++ simulator for Maze Crawler turn mechanics.
-- Keep hot simulation state fixed-capacity and allocation-free in `CrawlerSim::step`.
-- Maintain a Python bridge that can be called directly from Kaggle's agent API.
-- Represent hidden information in a lightweight belief state suitable for
-  determinization and search rollouts.
-- Search over bounded macro-action intents rather than the full primitive action
-  Cartesian product.
+It contains the complete native search loop, the rule-critical simulator fixes, and a Kaggle deployment path that ships source code plus vendored `pybind11` headers and JIT-compiles the extension inside the competition runtime.
 
 ## Current Status
 
-Implemented:
+Completed:
 
-- Fixed-buffer C++ state model for robots, cells, observations, actions, and macros.
-- Python extension module using `pybind11`.
-- Kaggle-compatible `main.py` agent entrypoint with a Python fallback policy.
-- Deterministic turn stepping for cooldowns, validation, energy drain, special
-  actions, movement, crush combat, resource collection, mine generation,
-  scrolling, boundary destruction, and rewards.
-- Macro-action generation and a conservative macro-to-primitive translation stub.
-- Rule and bridge smoke tests in `test.py`.
+- C++20 deterministic simulator with fixed-capacity state and allocation-free hot turn stepping.
+- Hybrid state model with absolute global arrays plus active 20x20 bitboards.
+- Player-centric belief update and deterministic hidden-state sampling.
+- Fixed-arena ISMCTS implementation with PUCT selection.
+- Bounded macro-action expansion over joint plans instead of primitive action Cartesian products.
+- Continuous rollout evaluation with terminal tiebreaker energy-margin shaping.
+- `int32_t` robot energy storage and factory capacity handling.
+- Spawn-combat, transfer, fixed-wall, jump/offboard, cooldown, mine, crystal, reward, and scrolling rule edge cases covered by tests.
+- Kaggle source-bundle packaging with vendored `pybind11` headers.
+- On-the-fly native compilation from `main.py` when no prebuilt extension is importable.
 
-Not yet complete:
+Remaining work is empirical rather than structural:
 
-- Full ISMCTS tree search and tuned rollout policy.
-- Large-scale simulator parity testing against the official Kaggle environment.
-- Submission packaging automation for compiled multi-file artifacts.
+- Tune `C_puct`, macro priors, rollout depth, and dynamic per-turn time budgets.
+- Improve rollout policy quality with self-play data and targeted heuristics.
+- Run large-scale self-play and ablation studies across seed suites.
+- Calibrate opening, mining, scout return, and factory advance policy weights.
 
 ## Repository Layout
 
 ```text
 .
-├── CMakeLists.txt              # C++20/pybind11 build configuration
-├── main.py                     # Kaggle agent entrypoint
+├── CMakeLists.txt              # Local C++20/pybind11 extension build
+├── main.py                     # Kaggle agent entrypoint with JIT native build
+├── package_submission.py       # Builds source bundle with vendored pybind11
 ├── submission.py               # Local alias for main.agent
-├── requirements-dev.txt        # Python build/test dependencies
-├── test.py                     # Bridge and simulator smoke tests
-├── rules/
-│   ├── README.md               # Competition rule reference
-│   └── AGENTS.md               # Local competition setup and usage notes
+├── requirements-dev.txt        # Build/test dependencies
+├── test.py                     # Rule, MCTS, bridge, and package smoke tests
+├── rules/                      # Competition rule reference and notes
 └── src/
-    ├── bindings.cpp            # pybind11 bridge
-    ├── crawler_engine.hpp      # Public C++ API and fixed-buffer contracts
+    ├── bindings.cpp            # pybind11 observation/action bridge
+    ├── crawler_engine.hpp      # Public API and fixed-buffer contracts
     ├── crawler_engine_internal.hpp
     ├── crawler_engine_internal.cpp
     ├── crawler_engine_state.cpp
     ├── crawler_engine_belief.cpp
     ├── crawler_engine_sim.cpp
     ├── crawler_engine_policy.cpp
+    ├── crawler_engine_mcts.cpp
     └── crawler_engine_engine.cpp
 ```
 
-## C++ Architecture
+## Architecture Overview
 
-The engine is split by responsibility:
+The engine is split by ownership boundary:
 
-- `crawler_engine.hpp` defines the public API, constants, enums, and fixed-size
-  state structures shared by all modules.
-- `crawler_engine_state.cpp` implements fixed-buffer storage, action parsing,
-  board queries, robot storage, and tactical bitboards.
-- `crawler_engine_belief.cpp` implements player-centric belief updates, enemy
-  probability diffusion, memory of discovered mines/layout, and hidden-state
-  determinization.
-- `crawler_engine_sim.cpp` implements exact deterministic game mechanics and the
-  phase-ordered `CrawlerSim::step()` function.
-- `crawler_engine_policy.cpp` implements the current heuristic policy,
-  macro-action generation, and macro-to-primitive translation.
-- `crawler_engine_engine.cpp` implements the high-level `Engine` facade used by
-  Python.
-- `crawler_engine_internal.cpp` implements shared deterministic helpers such as
-  RNG mixing, scroll interval calculation, wall mutation, and hidden row
-  generation.
-- `bindings.cpp` converts Python observations/actions to and from the fixed C++
-  buffers.
+- `crawler_engine.hpp` defines constants, enums, state buffers, macro actions, MCTS node layout, and the public `Engine` facade.
+- `crawler_engine_state.cpp` owns action parsing, geometry helpers, structure-of-arrays robot storage, active-window bitboards, and result buffers.
+- `crawler_engine_internal.cpp` owns deterministic support functions: RNG mixing, active bit masks, scroll interval reconstruction, reciprocal wall edits, and optimistic hidden-row generation.
+- `crawler_engine_belief.cpp` maintains player-centric map memory and hidden enemy probability fields, then samples determinizations for search.
+- `crawler_engine_sim.cpp` is the rule engine. `CrawlerSim::step()` implements the phase-ordered turn transition with fixed-size scratch arrays only.
+- `crawler_engine_policy.cpp` owns the deterministic fallback policy, opponent/rollout heuristics, macro generation, and macro-to-primitive translation.
+- `crawler_engine_mcts.cpp` owns the fixed-arena ISMCTS loop, PUCT selection, rollout evaluation, and root action extraction.
+- `crawler_engine_engine.cpp` wires observation updates, belief, current concrete state, and search together.
+- `bindings.cpp` translates Kaggle-style Python dictionaries into fixed C++ buffers and returns Kaggle-compatible `{uid: "ACTION"}` dictionaries.
 
-## Core Data Model
+## Fixed-Buffer State Model
 
-The engine uses fixed-capacity data structures to support fast rollouts:
+Maze Crawler exposes a scrolling 20x20 active window, but strategic information persists beyond the current visible rows. The engine models that with two cooperating coordinate systems:
 
-- Board width is fixed at `20`.
-- Active tactical window is `20 x 20`.
-- Absolute row storage is allocated for `20 * 512` cells.
-- Robots are stored in a Structure of Arrays layout with `MAX_ROBOTS = 512`.
-- UIDs are stored in fixed `char[24]` buffers.
-- Active-window occupancy, visibility, crystal, mine, and node masks use compact
-  bitboards backed by `uint64_t`.
-- `PrimitiveActions` and `ActionResult` are fixed-size buffers addressed by
-  simulator robot index.
+- Absolute arrays indexed by `row * WIDTH + col` across `MAX_ROWS = 512`.
+- Active-window bitboards indexed by `(row - south_bound) * WIDTH + col`.
 
-Cell arrays in `BoardState` are indexed by absolute cell index:
+Core limits are compile-time constants:
 
 ```text
-abs_index = row * WIDTH + col
+WIDTH = 20
+HEIGHT = 20
+ACTIVE_CELLS = 400
+MAX_ROWS = 512
+MAX_CELLS = 10240
+MAX_ROBOTS = 512
+MAX_MACROS = 16
+MAX_TREE_NODES = 4096
+MAX_MCTS_PLAN_ROBOTS = 64
+MAX_MCTS_CANDIDATES = 64
+MCTS_TREE_DEPTH = 24
+MCTS_ROLLOUT_DEPTH = 48
 ```
 
-Observation wall arrays are indexed by active-window local index:
+`BoardState` stores wall knowledge, crystal energy, mine energy, mine caps, mine owners, and mining nodes in absolute arrays. This allows belief memory and rollout simulation to survive scroll movement without reindexing the whole world.
+
+The current tactical window is rebuilt into compact `uint64_t` bitboards:
+
+- `own_occupancy`
+- `enemy_occupancy`
+- `all_occupancy`
+- `visibility`
+- `crystals_active`
+- `mines_active`
+- `nodes_active`
+
+`BitBoard` uses fixed `std::array<uint64_t, ACTIVE_WORDS>` storage. Low-level iteration support uses `std::countr_zero` in `pop_lsb`, which compilers lower to efficient bit-scan instructions on normal Kaggle CPUs.
+
+Robots use a structure-of-arrays store:
 
 ```text
-local_index = (row - southBound) * WIDTH + col
+uid[512][24]
+alive[512]
+type[512]
+owner[512]
+col[512]
+row[512]
+energy[512]
+move_cd[512]
+jump_cd[512]
+build_cd[512]
 ```
 
-## Simulator Semantics
+Energy is stored as `int32_t`, not `int16_t`. This is required for factories: transfers, collection, and reward accounting can push factory energy far beyond unit caps. Factory capacity calculations use `int32_t` space, while non-factory units remain capped by their rule-defined maximums. Reward accumulation uses `int64_t` margins to avoid narrowing during terminal comparisons.
 
-`CrawlerSim::step()` follows the documented Maze Crawler turn order:
+## ISMCTS Core
 
-1. Cooldown tick.
-2. Action validation.
-3. Per-robot energy consumption.
-4. Special actions:
-   - Miner transform.
-   - Worker wall build/remove.
-   - Factory build.
-   - Energy transfer.
-5. Simultaneous movement and crush combat.
-6. Crystal collection.
-7. Mine pickup.
-8. Mine generation.
-9. Scroll advancement and row generation.
-10. Boundary destruction.
-11. Reward and win-condition update.
-12. Tactical bitboard rebuild.
+`Engine::choose_actions(time_budget_ms, seed)` runs Information Set MCTS over the current belief state. Each iteration samples one concrete board from the belief, replays the selected macro history through that determinization, rolls out with deterministic heuristics, and backpropagates a root-player value.
 
-Important mechanical details implemented in the simulator:
+The search tree is backed by `MCTSArena`:
 
-- Crush hierarchy is `Factory > Miner > Worker > Scout`.
-- Same-type collisions annihilate all units of that type.
-- Friendly fire is active.
-- Factory builds spawn the new robot before movement/combat, so the spawned unit
-  is a stationary combat participant on that turn.
-- Transfers send all source energy; target energy is capped and overflow is
-  discarded.
-- Worker edits on fixed walls still spend energy but do not change the wall.
-- North/south off-board movement without a blocking wall destroys the unit.
-- Factory jumps ignore walls and destroy the factory if the landing cell is off
-  board.
+```cpp
+struct MCTSArena {
+    std::array<MCTSNode, MAX_TREE_NODES> nodes{};
+    int used = 0;
+};
+```
 
-`CrawlerSim::step()` uses fixed-size scratch arrays and does not allocate heap
-memory in the hot path.
+Resetting a turn rewinds `used`; node storage remains allocated in place and is overwritten. Node creation is a bump-pointer operation. No heap allocations are performed in the tree hot loop.
 
-## Belief and Determinization
+Each `MCTSNode` stores:
 
-`BeliefState` is player-centric. It tracks:
+- Parent, first-child, and next-sibling indices.
+- Visit count and accumulated value.
+- PUCT prior.
+- Depth and expansion flag.
+- One joint macro plan keyed by robot UID.
 
-- Known walls and remembered layout.
-- Currently visible crystals.
-- Remembered mines.
-- Remembered mining nodes.
-- Currently visible cells.
-- Per-type enemy probability fields.
+Plans are UID-keyed so the same action history remains meaningful across sampled determinizations where simulator-local robot slots may differ.
 
-On each observation update:
+### Selection
 
-- Known wall facts are copied into permanent memory.
-- Visible cells clear impossible hidden enemy probability.
-- Observed enemies overwrite probability at their current cells.
-- Hidden enemy probabilities diffuse by movement capability and known walls.
-- Crystals are treated as visible-only facts.
-- Mines are remembered once observed.
+Selection uses PUCT:
 
-`BeliefState::determinize(seed)` produces a concrete `BoardState` for future
-search rollouts by copying known facts, sampling plausible hidden rows, and
-placing hidden enemies from probability fields.
+```text
+score = Q + C_puct * prior * sqrt(parent_visits + 1) / (child_visits + 1)
+```
 
-## Macro Actions
+The current code uses:
 
-The engine includes a bounded macro-action layer to keep future search branching
-manageable. Macro actions represent intent-level decisions such as:
+```text
+C_puct = 1.35
+```
+
+Root action choice is visit-count first, value second. This keeps the final move robust under short Kaggle budgets while still using rollout value to break ties.
+
+### Expansion
+
+The search does not branch over every primitive action for every robot. It branches over bounded macro plans.
+
+For the controlled side, candidate generation builds:
+
+- A baseline joint plan using the deterministic default macro for every controlled robot.
+- One-robot deviations from that baseline, drawn from each robot's bounded `MacroList`.
+
+This keeps branching capped by `MAX_MCTS_CANDIDATES = 64`, even when many units are alive. The controlled robot list is capped at `MAX_MCTS_PLAN_ROBOTS = 64`.
+
+Supported macro intents include:
 
 - `FACTORY_SAFE_ADVANCE`
 - `FACTORY_BUILD_WORKER`
@@ -193,17 +186,163 @@ manageable. Macro actions represent intent-level decisions such as:
 - `SCOUT_RETURN_ENERGY`
 - `MINER_SEEK_NODE`
 - `MINER_TRANSFORM`
+- `IDLE`
 
-`CrawlerSim::generate_macros_for(robot_index)` returns a bounded `MacroList`.
-`CrawlerSim::primitive_for_macro(robot_index, macro)` translates one macro into
-a primitive Kaggle action when possible, otherwise `IDLE`.
+Macro priors encode the current tactical bias. Examples:
 
-The current `Engine::choose_actions()` still uses a deterministic heuristic
-fallback. The macro path is present and kept live for later ISMCTS integration.
+```text
+FACTORY_BUILD_WORKER = 1.25
+MINER_TRANSFORM = 1.15
+FACTORY_BUILD_SCOUT = 1.10
+SCOUT_HUNT_CRYSTAL = 1.00
+WORKER_ADVANCE = 0.95
+SCOUT_RETURN_ENERGY = 0.75
+IDLE = 0.20
+```
+
+Child priors are normalized across generated candidates.
+
+### Simulation and Rollout
+
+When a selected node is applied:
+
+- Opponent and non-overridden friendly actions are filled by `heuristic_action_for_owner`.
+- Planned root-player macro entries are translated into primitive actions with `primitive_for_macro`.
+- The deterministic simulator executes one full turn.
+
+Rollouts continue for up to `MCTS_ROLLOUT_DEPTH = 48` turns or until terminal state. They use the same deterministic heuristic policy for both owners. This keeps rollout evaluation cheap, reproducible, and rule-compliant.
+
+### Value Function
+
+Terminal death states return exact win/loss values. Tiebreaker states use a continuous energy margin rather than a binary threshold:
+
+```text
+tanh(energy_diff / 800.0)
+```
+
+If terminal energy is tied, unit count is shaped with:
+
+```text
+tanh(unit_diff / 4.0)
+```
+
+Non-terminal rollout leaves use a continuous blend:
+
+```text
+0.55 * tanh(energy_diff / 1000.0)
++ 0.20 * tanh(material_diff / 10.0)
++ 0.10 * tanh(unit_diff / 8.0)
++ 0.10 * tanh(best_factory_row_diff / 8.0)
++ 0.05 * tanh(factory_margin_diff / 8.0)
+```
+
+This gives the search a usable gradient during mid-game while preserving the competition tiebreaker logic near episode end.
+
+## Rule Fidelity
+
+`CrawlerSim::step()` implements the turn order as a deterministic phase machine:
+
+1. Cooldown tick.
+2. Primitive action type validation.
+3. Per-turn energy drain.
+4. Miner transform.
+5. Worker wall edits.
+6. Factory builds.
+7. Energy transfers.
+8. Simultaneous movement intent collection.
+9. Same-cell crush combat.
+10. Position application for surviving movers.
+11. Crystal combat cleanup and collection.
+12. Mine pickup.
+13. Mine generation.
+14. Scroll advancement and hidden-row generation.
+15. Boundary destruction and old-row cleanup.
+16. Reward/winner update.
+17. Active tactical bitboard rebuild.
+
+The simulator tests and code cover the rule details that matter most for search quality:
+
+- Cooldowns tick before action execution, so cooldown `1` is effectively ready.
+- Energy drains before special actions; macro legality checks account for that.
+- Miner transform runs before movement and destroys the miner.
+- Worker wall edits spend energy even on fixed walls, but fixed walls do not change.
+- Reciprocal wall bits are maintained when walls are built or removed.
+- Factory builds happen before movement/combat.
+- Spawned robots are stationary combat participants on the same turn.
+- Transfers happen before movement.
+- Transfers drain the source to zero and discard overflow beyond target capacity.
+- Factories use `int32_t` energy capacity for transfer/collection space.
+- Movement is simultaneous.
+- Same-type collisions annihilate all units of that type in the cell.
+- Crush hierarchy is `Factory > Miner > Worker > Scout`.
+- Enemy factories mutually annihilate.
+- Friendly fire is active through the same crush rules.
+- Crystals disappear on combat cells with no survivor; otherwise the survivor collects subject to energy space.
+- Mine pickup happens before mine generation.
+- Scroll cadence is reconstructed from the observed step, including the ramp from interval 4 to interval 1 over the first 400 steps.
+- New rows are generated deterministically for sampled future state.
+- Units below the new `south_bound` are destroyed.
+- Resources below the active boundary are cleared.
+- Jumps set both movement and jump cooldowns and destroy the factory if the landing cell is off board.
+
+## Belief and Determinization
+
+`BeliefState` is player-centric. It tracks:
+
+- Known walls.
+- Remembered wall layout.
+- Visible crystal energy.
+- Remembered mine energy, maximum, and owner.
+- Remembered mining nodes.
+- Current visibility mask.
+- Per-type enemy probability fields for factories, scouts, workers, and miners.
+
+On observation update:
+
+- Enemy probability diffuses according to elapsed turns and unit movement periods.
+- Known walls constrain diffusion.
+- Friendly vision clears impossible enemy locations.
+- Observed walls overwrite map memory.
+- Visible crystals are treated as current facts.
+- Mines and mining nodes are remembered.
+- Observed enemies collapse their type probability to the observed cell.
+
+`BeliefState::determinize(seed)` copies known facts into a concrete `BoardState`, generates plausible unknown rows, and samples hidden enemies from their type-specific probability fields. `Engine::determinize(seed)` then re-inserts all currently observed live robots with their exact UID, owner, position, energy, and cooldowns. That concrete state is what the MCTS iteration uses.
+
+## Kaggle JIT Deployment
+
+Kaggle submissions normally enter through Python, but this repository ships a native C++ engine without requiring a prebuilt wheel.
+
+`package_submission.py` creates `submission.tar.gz` containing:
+
+- `main.py`
+- every `src/*.cpp`
+- every `src/*.hpp`
+- the complete `pybind11` include tree under `vendor/pybind11/include`
+
+At runtime, `main.py` first tries:
+
+```python
+import crawler_engine
+```
+
+If no compatible extension is present, `_ensure_native_engine()` compiles one in place with `g++`:
+
+```text
+g++ -std=c++20 -O3 -DNDEBUG -fPIC -shared -ffast-math -march=native \
+    -Isrc -Ivendor/pybind11/include -I<python include dirs> \
+    src/*.cpp -o crawler_engine<EXT_SUFFIX>
+```
+
+After compilation, it invalidates import caches and imports the newly built extension. The extension suffix comes from `sysconfig`, so the produced filename matches the running Python interpreter.
+
+If compilation or import fails, `main.py` falls back to a small pure-Python policy. That fallback exists for diagnostics and graceful failure only; the competitive path is the native JIT engine.
+
+The package smoke test extracts `submission.tar.gz` into a clean temporary directory with no `PYTHONPATH`, runs `python main.py`, verifies the JIT import, then calls `main.agent` against a minimal Kaggle-style observation.
 
 ## Python API
 
-Build output creates a Python module named `crawler_engine`.
+Local development builds a module named `crawler_engine`.
 
 ```python
 import crawler_engine
@@ -228,98 +367,45 @@ actions = engine.choose_actions(time_budget_ms=2000, seed=123)
 Returned actions are Kaggle-compatible:
 
 ```python
-{"robot_uid": "NORTH", "factory_uid": "BUILD_WORKER"}
+{"f0": "BUILD_WORKER", "s0": "NORTH"}
 ```
 
-Additional debug/test APIs:
+Debug/test helpers:
 
-- `engine.step(actions)` applies a Python dict of primitive actions to the
-  current simulator state.
+- `engine.step(actions)` applies primitive actions to the current simulator snapshot.
 - `engine.determinize(seed=0)` returns a summary of a sampled rollout state.
-- `engine.debug_state()` returns a summary of the current concrete simulator state.
-- `crawler_engine.action_name(int_action)` returns the primitive action string.
-- `crawler_engine.macro_action_name(int_macro)` returns the macro action string.
+- `engine.debug_state()` returns a summary of the current concrete simulator snapshot.
+- `engine.debug_mcts_value(player=-1)` returns the current evaluator value.
+- `crawler_engine.action_name(int_action)` returns a primitive action string.
+- `crawler_engine.macro_action_name(int_macro)` returns a macro action string.
 
-## Kaggle Entrypoint
+## Local Build
 
-`main.py` defines the competition entrypoint:
-
-```python
-def agent(obs, config):
-    ...
-```
-
-The entrypoint keeps one C++ engine per player in process-local memory:
-
-```python
-_ENGINES = {}
-```
-
-For each call it:
-
-1. Extracts Kaggle observation fields.
-2. Updates the C++ engine observation.
-3. Calls `choose_actions`.
-4. Returns `{uid: "ACTION"}`.
-
-If the compiled extension cannot be imported, `main.py` falls back to a small
-pure-Python policy. This is intended to make import failures visible without
-crashing immediately; it is not intended to be competitive.
-
-## Requirements
-
-System requirements:
+Requirements:
 
 - CMake 3.20 or newer.
 - C++20 compiler.
-- Python 3 with development module support.
-- `pybind11` installed in the Python interpreter used by CMake.
+- Python 3 with development headers.
+- `pybind11`, `numpy`, `pytest`, and `kaggle-environments` from `requirements-dev.txt`.
 
-Python development dependencies are listed in `requirements-dev.txt`:
-
-- `pybind11`
-- `numpy`
-- `pytest`
-- `kaggle-environments`
-
-A virtual environment is recommended because many hosted development containers
-use externally managed system Python installations.
+Create a development environment:
 
 ```bash
 python3 -m venv /tmp/maze-crawler-venv
 /tmp/maze-crawler-venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-## Build
-
-Configure CMake with the same Python interpreter that has `pybind11` installed:
+Configure and build:
 
 ```bash
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DPython3_EXECUTABLE=/tmp/maze-crawler-venv/bin/python
-```
 
-Build the extension:
-
-```bash
 cmake --build build -j
 ```
 
-The compiled module is written under `build/`, for example:
-
-```text
-build/crawler_engine.cpython-312-x86_64-linux-gnu.so
-```
-
-Release builds use:
-
-- `-O3`
-- `-march=native`
-- `-ffast-math`
-- `NDEBUG`
-
-These flags are selected in `CMakeLists.txt` for GCC/Clang release builds.
+Release builds use `-O3`, `-march=native`, `-ffast-math`, and `NDEBUG` for GCC/Clang.
 
 ## Test
 
@@ -329,55 +415,65 @@ Run the smoke script:
 PYTHONPATH=build /tmp/maze-crawler-venv/bin/python test.py
 ```
 
-Run the same tests through pytest:
+Run through pytest:
 
 ```bash
 PYTHONPATH=build /tmp/maze-crawler-venv/bin/python -m pytest -q test.py
 ```
 
-Current test coverage includes:
+Current coverage includes:
 
-- Python bridge import and action generation.
+- pybind bridge import and action generation.
 - Factory build and spawn-before-combat behavior.
+- Spawned unit participation in same-turn combat.
 - Same-type annihilation.
-- Factory/factory mutual destruction.
+- Enemy factory mutual destruction.
 - Stronger-type crush resolution.
 - Crystal collection and combat consumption.
-- Transfer source drain and target cap behavior.
+- Transfer source drain, target cap, and factory `int32_t` overflow protection.
+- Scroll counter reconstruction for high-step observations.
+- Continuous MCTS tiebreaker value from energy margin.
 - Period-two movement cooldown behavior.
-- Factory jump cooldown and movement cooldown behavior.
-- Fixed center-wall edit no-op behavior.
+- Factory jump cooldown behavior.
+- Fixed center-wall edit no-op with energy cost.
 - Off-board jump destruction.
+- MCTS small-time-budget behavior and action validity.
+- Packaged submission JIT compilation in an extracted clean directory.
 
-## CI/CD
+## Kaggle Submission Bundle
 
-GitHub Actions workflow configuration is stored in `.github/workflows/ci.yml`.
+Build the source bundle:
 
-The workflow runs on:
+```bash
+/tmp/maze-crawler-venv/bin/python package_submission.py
+```
 
-- Pull requests.
-- Pushes to `main` or `master`.
-- Version tags matching `v*`.
-- Manual `workflow_dispatch` runs.
+This writes:
 
-The CI job:
+```text
+submission.tar.gz
+```
 
-- Sets up Python 3.11 and 3.12 on Ubuntu.
-- Installs `requirements-dev.txt`.
-- Configures CMake against the active Python interpreter.
-- Builds the `crawler_engine` extension in release mode.
-- Runs `test.py`.
-- Runs `pytest`.
-- Verifies that `main.agent` imports and returns a Kaggle-compatible action dict.
-- Uploads the compiled extension and `compile_commands.json` as artifacts.
+The archive is intentionally source-first. It does not rely on the local build directory or a platform-specific `.so`; Kaggle compiles the native extension in the extracted submission directory.
 
-The packaging job creates a source tarball artifact after successful CI. On
-version tags, the release job bundles all workflow artifacts and publishes them
-to the GitHub Release for that tag.
+## Kaggle Entrypoint
 
-## Local Agent Smoke Run
+`main.py` defines:
 
-After building the extension, the Python entrypoint can be exercised directly:
+```python
+def agent(obs, config):
+    ...
+```
+
+The entrypoint keeps one C++ `Engine` per player in `_ENGINES`. Each call:
+
+1. Ensures the native engine is importable, JIT-compiling it if needed.
+2. Extracts Kaggle observation fields.
+3. Updates the C++ belief and concrete simulator snapshot.
+4. Calls `engine.choose_actions(2000, seed=...)`.
+5. Returns `{uid: "ACTION"}`.
+
+A minimal local smoke call after building:
 
 ```bash
 PYTHONPATH=build /tmp/maze-crawler-venv/bin/python - <<'PY'
@@ -400,76 +496,59 @@ print(agent(obs, config))
 PY
 ```
 
-## Development Notes
+## CI/CD
 
-- Read `rules/README.md` before changing simulator mechanics.
-- Keep `CrawlerSim::step()` allocation-free. Use fixed-size `std::array`
-  scratch buffers for per-turn working state.
-- Keep pybind conversion logic in `bindings.cpp`; do not put search or rules
-  logic there.
-- Keep hidden-information update logic in `crawler_engine_belief.cpp`.
-- Keep exact game mechanics in `crawler_engine_sim.cpp`.
-- Keep heuristics and macro-action translation in `crawler_engine_policy.cpp`.
-- Prefer preserving fixed-capacity containers unless a change is explicitly
-  outside the rollout hot path.
-- Add tests for every rule edge case before tuning policy behavior.
+`.github/workflows/ci.yml` builds and tests the extension on Ubuntu with Python 3.11 and 3.12. The workflow:
 
-## Troubleshooting
+- Installs `requirements-dev.txt`.
+- Configures CMake against the active Python interpreter.
+- Builds the release extension.
+- Runs `test.py`.
+- Runs `pytest`.
+- Verifies `main.agent` returns a Kaggle-compatible dict.
+- Uploads compiled extension artifacts and `compile_commands.json`.
+- Packages source artifacts.
+- Publishes bundled artifacts on version tags.
 
-### CMake cannot find pybind11
+## Development Rules
 
-Configure with the Python interpreter that has `pybind11` installed:
-
-```bash
-cmake -S . -B build \
-  -DPython3_EXECUTABLE=/tmp/maze-crawler-venv/bin/python
-```
-
-If the error persists, verify:
-
-```bash
-/tmp/maze-crawler-venv/bin/python -m pybind11 --cmakedir
-```
-
-### Python cannot import crawler_engine
-
-Ensure the build directory is on `PYTHONPATH`:
-
-```bash
-PYTHONPATH=build /tmp/maze-crawler-venv/bin/python -c "import crawler_engine; print(crawler_engine.__version__)"
-```
-
-### Tests use the wrong Python interpreter
-
-Run tests through the same virtual environment used by CMake:
-
-```bash
-PYTHONPATH=build /tmp/maze-crawler-venv/bin/python -m pytest -q test.py
-```
-
-### Build artifacts are stale after source-list changes
-
-Reconfigure CMake:
-
-```bash
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DPython3_EXECUTABLE=/tmp/maze-crawler-venv/bin/python
-cmake --build build -j
-```
+- Keep `CrawlerSim::step()` allocation-free. Use fixed-size buffers for per-turn scratch.
+- Keep exact rules in `crawler_engine_sim.cpp`.
+- Keep belief and hidden-information updates in `crawler_engine_belief.cpp`.
+- Keep search in `crawler_engine_mcts.cpp`.
+- Keep policy, rollout heuristics, and macro translation in `crawler_engine_policy.cpp`.
+- Keep Python conversion in `bindings.cpp`; do not put rules or search logic in the bridge.
+- Preserve fixed-capacity data layouts unless the code is explicitly outside the rollout/search hot path.
+- Add tests before changing any rule-sensitive behavior.
 
 ## Roadmap
 
-Near-term engineering priorities:
+The remaining roadmap is data science and empirical optimization:
 
-- Expand simulator parity tests against official environment traces.
-- Add more targeted edge cases for scrolling, mines, factory elimination, and
-  simultaneous special-action interactions.
-- Replace heuristic action selection with macro-ISMCTS.
-- Add rollout evaluation functions and macro priors.
-- Add profiling benchmarks for `CrawlerSim::step()`.
-- Prepare repeatable Kaggle submission packaging for compiled artifacts.
+- Hyperparameter tuning:
+  - `C_puct`
+  - tree depth
+  - rollout depth
+  - candidate cap
+  - macro prior weights
+- Dynamic time control:
+  - opening versus mid-game budgets
+  - unit-count-aware iteration budgets
+  - deadline guard tuning for Kaggle variance
+- Rollout policy refinement:
+  - better scout crystal routing
+  - miner-node conversion timing
+  - worker wall opening versus escort tradeoffs
+  - factory build mix by phase and visible economy
+- Evaluation:
+  - deterministic seed suites
+  - large-scale self-play
+  - macro-prior ablations
+  - rollout-depth ablations
+  - opponent-policy robustness tests
+
+Core engine implementation, rule fidelity, fixed-arena search, and Kaggle JIT deployment are complete.
 
 ## License
 
-See `LICENSE`.
+See [`LICENSE`](./LICENSE).

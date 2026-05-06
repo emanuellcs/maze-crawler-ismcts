@@ -24,6 +24,10 @@ constexpr int MAX_OBS_MINES = ACTIVE_CELLS;
 constexpr int MAX_OBS_NODES = ACTIVE_CELLS;
 constexpr int MAX_MACROS = 16;
 constexpr int MAX_TREE_NODES = 4096;
+constexpr int MAX_MCTS_PLAN_ROBOTS = 64;
+constexpr int MAX_MCTS_CANDIDATES = 64;
+constexpr int MCTS_TREE_DEPTH = 24;
+constexpr int MCTS_ROLLOUT_DEPTH = 48;
 
 constexpr int EPISODE_STEPS = 501;
 constexpr int FACTORY_ENERGY = 1000;
@@ -161,7 +165,7 @@ struct RobotStore {
     std::array<uint8_t, MAX_ROBOTS> owner{};
     std::array<int16_t, MAX_ROBOTS> col{};
     std::array<int16_t, MAX_ROBOTS> row{};
-    std::array<int16_t, MAX_ROBOTS> energy{};
+    std::array<int32_t, MAX_ROBOTS> energy{};
     std::array<int16_t, MAX_ROBOTS> move_cd{};
     std::array<int16_t, MAX_ROBOTS> jump_cd{};
     std::array<int16_t, MAX_ROBOTS> build_cd{};
@@ -295,6 +299,33 @@ struct MacroList {
     std::array<MacroAction, MAX_MACROS> macros{};
 };
 
+// Fixed-arena ISMCTS tree node. Edges store one bounded joint macro plan keyed
+// by robot UID so children remain meaningful across sampled determinizations.
+struct MCTSNode {
+    int parent = -1;
+    int first_child = -1;
+    int next_sibling = -1;
+    int child_count = 0;
+    int visits = 0;
+    int depth = 0;
+    int plan_count = 0;
+    float value_sum = 0.0F;
+    float prior = 0.0F;
+    uint8_t expanded = 0;
+    std::array<std::array<char, UID_LEN>, MAX_MCTS_PLAN_ROBOTS> plan_uid{};
+    std::array<MacroAction, MAX_MCTS_PLAN_ROBOTS> plan_macro{};
+};
+
+// Zero-allocation node arena. Resetting a turn only rewinds `used`; node storage
+// remains in place and is overwritten as new nodes are created.
+struct MCTSArena {
+    std::array<MCTSNode, MAX_TREE_NODES> nodes{};
+    int used = 0;
+
+    void reset();
+    [[nodiscard]] int create_node(int parent, int depth, float prior);
+};
+
 // Player-centric belief state. Visible facts overwrite belief; hidden enemies are
 // represented as lightweight per-type probability fields for determinization.
 struct BeliefState {
@@ -327,6 +358,7 @@ public:
     void load_from_observation(const ObservationInput& obs, const BeliefState& belief);
     void step(const PrimitiveActions& actions);
     [[nodiscard]] Action heuristic_action_for(int robot_index) const;
+    [[nodiscard]] Action heuristic_action_for_owner(int robot_index, int owner) const;
     [[nodiscard]] MacroList generate_macros_for(int robot_index) const;
     [[nodiscard]] Action primitive_for_macro(int robot_index, MacroAction macro) const;
 };
@@ -337,6 +369,7 @@ class Engine {
 public:
     BeliefState belief{};
     CrawlerSim sim{};
+    MCTSArena mcts{};
 
     Engine();
     explicit Engine(int player);
@@ -345,6 +378,7 @@ public:
     void step_actions(const PrimitiveActions& actions);
     [[nodiscard]] BoardState determinize(uint64_t seed) const;
     [[nodiscard]] ActionResult choose_actions(int time_budget_ms, uint64_t seed);
+    [[nodiscard]] float debug_mcts_value(int player) const;
 };
 
 }  // namespace crawler

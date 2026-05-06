@@ -27,6 +27,7 @@ pybind11_add_module(crawler_engine
   src/crawler_engine_belief.cpp
   src/crawler_engine_engine.cpp
   src/crawler_engine_internal.cpp
+  src/crawler_engine_mcts.cpp
   src/crawler_engine_policy.cpp
   src/crawler_engine_sim.cpp
   src/crawler_engine_state.cpp

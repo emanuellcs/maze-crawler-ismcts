@@ -1,7 +1,7 @@
 #include "crawler_engine_internal.hpp"
 
-// Deterministic fallback policy and macro-action translation. Full ISMCTS should
-// replace selection, but keep using these bounded macro generators.
+// Deterministic fallback policy and macro-action translation. ISMCTS consumes
+// these bounded macro generators and uses the heuristics for playouts.
 
 #include <array>
 #include <cmath>
@@ -192,11 +192,16 @@ void add_macro(MacroList& list, MacroAction macro) {
 
 }  // namespace
 
-// Fast deterministic fallback policy while full ISMCTS rollout selection is still being built.
 Action CrawlerSim::heuristic_action_for(int robot_index) const {
+    return heuristic_action_for_owner(robot_index, state.player);
+}
+
+// Fast deterministic fallback policy used by direct action selection, opponent
+// modeling, and rollout playouts.
+Action CrawlerSim::heuristic_action_for_owner(int robot_index, int for_owner) const {
     if (robot_index < 0 || robot_index >= state.robots.used ||
         state.robots.alive[static_cast<size_t>(robot_index)] == 0 ||
-        state.robots.owner[static_cast<size_t>(robot_index)] != state.player) {
+        state.robots.owner[static_cast<size_t>(robot_index)] != for_owner) {
         return ACT_IDLE;
     }
     const uint8_t type = state.robots.type[static_cast<size_t>(robot_index)];
@@ -210,7 +215,7 @@ Action CrawlerSim::heuristic_action_for(int robot_index) const {
         int scouts = 0;
         for (int i = 0; i < state.robots.used; ++i) {
             if (state.robots.alive[static_cast<size_t>(i)] != 0 &&
-                state.robots.owner[static_cast<size_t>(i)] == state.player) {
+                state.robots.owner[static_cast<size_t>(i)] == for_owner) {
                 workers += state.robots.type[static_cast<size_t>(i)] == WORKER ? 1 : 0;
                 scouts += state.robots.type[static_cast<size_t>(i)] == SCOUT ? 1 : 0;
             }

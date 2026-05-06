@@ -2,15 +2,140 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+from pathlib import Path
 from random import choice
+import subprocess
+import sys
+import sysconfig
+import traceback
 
 try:
     import crawler_engine
-except Exception:  # pragma: no cover - fallback is for submission diagnostics.
+    _ENGINE_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - fallback is for submission diagnostics.
     crawler_engine = None
+    _ENGINE_IMPORT_ERROR = exc
 
 
 _ENGINES = {}
+_JIT_ATTEMPTED = False
+_ROOT = Path(__file__).resolve().parent
+
+
+def _jit_log(message):
+    print(f"[crawler_engine jit] {message}", file=sys.stderr, flush=True)
+
+
+def _pybind11_include_dir():
+    candidates = []
+    vendor = _ROOT / "vendor" / "pybind11" / "include"
+    candidates.append(vendor)
+    try:
+        import pybind11
+
+        candidates.append(Path(pybind11.get_include()))
+    except Exception:
+        pass
+
+    for path in candidates:
+        if (path / "pybind11" / "pybind11.h").exists():
+            return path
+    return None
+
+
+def _python_include_dirs():
+    paths = sysconfig.get_paths()
+    include_dirs = []
+    for key in ("include", "platinclude"):
+        value = paths.get(key)
+        if value and Path(value).exists() and value not in include_dirs:
+            include_dirs.append(value)
+    return include_dirs
+
+
+def _compile_native_engine():
+    sources = sorted((_ROOT / "src").glob("*.cpp"))
+    if not sources:
+        _jit_log("no C++ sources found under src/")
+        return False
+
+    pybind_include = _pybind11_include_dir()
+    if pybind_include is None:
+        _jit_log("pybind11 headers not found; expected vendor/pybind11/include or installed pybind11")
+        return False
+
+    python_includes = _python_include_dirs()
+    if not python_includes:
+        _jit_log("Python development headers not found via sysconfig")
+        return False
+
+    ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+    output = _ROOT / f"crawler_engine{ext_suffix}"
+    compiler = os.environ.get("CXX", "g++")
+    command = [
+        compiler,
+        "-std=c++20",
+        "-O3",
+        "-DNDEBUG",
+        "-fPIC",
+        "-shared",
+        "-ffast-math",
+        "-march=native",
+        "-Isrc",
+        f"-I{pybind_include}",
+    ]
+    command.extend(f"-I{path}" for path in python_includes)
+    command.extend(str(path.relative_to(_ROOT)) for path in sources)
+    command.extend(["-o", str(output)])
+
+    _jit_log("compiling native engine")
+    _jit_log("command: " + " ".join(command))
+    try:
+        result = subprocess.run(command, cwd=_ROOT, capture_output=True, text=True, timeout=180)
+    except Exception:
+        _jit_log("compiler invocation failed")
+        _jit_log(traceback.format_exc())
+        return False
+
+    if result.stdout:
+        _jit_log("compiler stdout:\n" + result.stdout)
+    if result.stderr:
+        _jit_log("compiler stderr:\n" + result.stderr)
+    if result.returncode != 0:
+        _jit_log(f"compiler exited with status {result.returncode}")
+        return False
+
+    _jit_log(f"native engine built at {output.name}")
+    return True
+
+
+def _ensure_native_engine():
+    global crawler_engine, _JIT_ATTEMPTED
+    if crawler_engine is not None:
+        return True
+    if _JIT_ATTEMPTED:
+        return False
+
+    _JIT_ATTEMPTED = True
+    if _ENGINE_IMPORT_ERROR is not None:
+        _jit_log(f"initial import failed: {_ENGINE_IMPORT_ERROR}")
+    if not _compile_native_engine():
+        return False
+
+    try:
+        importlib.invalidate_caches()
+        if str(_ROOT) not in sys.path:
+            sys.path.insert(0, str(_ROOT))
+        crawler_engine = importlib.import_module("crawler_engine")
+        _jit_log("native engine import succeeded after JIT compile")
+        return True
+    except Exception:
+        _jit_log("native engine import failed after JIT compile")
+        _jit_log(traceback.format_exc())
+        crawler_engine = None
+        return False
 
 
 def _get(obj, name, default=None):
@@ -62,6 +187,7 @@ def _fallback_agent(obs, config):
 
 
 def agent(obs, config):
+    _ensure_native_engine()
     if crawler_engine is None:
         return _fallback_agent(obs, config)
 
@@ -84,3 +210,7 @@ def agent(obs, config):
         step,
     )
     return engine.choose_actions(2000, seed=(step + 1) * 1315423911 + player)
+
+
+if __name__ == "__main__":
+    print(f"crawler_engine native available: {_ensure_native_engine()}")
