@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 import crawler_engine
@@ -8,6 +10,33 @@ import crawler_engine
 WIDTH = 20
 HEIGHT = 20
 WALL_N, WALL_E, WALL_S, WALL_W = 1, 2, 4, 8
+VALID_ACTIONS = {
+    "IDLE",
+    "NORTH",
+    "SOUTH",
+    "EAST",
+    "WEST",
+    "BUILD_SCOUT",
+    "BUILD_WORKER",
+    "BUILD_MINER",
+    "JUMP_NORTH",
+    "JUMP_SOUTH",
+    "JUMP_EAST",
+    "JUMP_WEST",
+    "BUILD_NORTH",
+    "BUILD_SOUTH",
+    "BUILD_EAST",
+    "BUILD_WEST",
+    "REMOVE_NORTH",
+    "REMOVE_SOUTH",
+    "REMOVE_EAST",
+    "REMOVE_WEST",
+    "TRANSFORM",
+    "TRANSFER_NORTH",
+    "TRANSFER_SOUTH",
+    "TRANSFER_EAST",
+    "TRANSFER_WEST",
+}
 
 
 def open_walls():
@@ -175,6 +204,24 @@ def test_offboard_jump_death():
     assert not any(r["uid"] == "f0" for r in state["robotList"])
 
 
+def test_mcts_respects_small_time_budget_and_returns_valid_actions():
+    robots = {
+        "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
+        "w0": [2, 5, 4, 180, 0, 0, 0, 0],
+        "s0": [1, 6, 4, 80, 0, 0, 0, 0],
+        "f1": [0, 14, 2, 1000, 1, 0, 0, 0],
+        "s1": [1, 14, 5, 80, 1, 0, 0, 0],
+    }
+    engine = make_engine(robots, crystals={"6,5": 30}, nodes={"5,6": 1})
+    start = time.perf_counter()
+    actions = engine.choose_actions(5, seed=12345)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+    assert elapsed_ms < 100.0
+    assert set(actions) == {"f0", "w0", "s0"}
+    assert set(actions.values()) <= VALID_ACTIONS
+
+
 if __name__ == "__main__":
     test_bridge_smoke()
     test_factory_build_spawn_before_combat()
@@ -186,4 +233,5 @@ if __name__ == "__main__":
     test_jump_sets_move_and_jump_cooldowns()
     test_fixed_center_wall_remove_costs_but_does_not_open()
     test_offboard_jump_death()
+    test_mcts_respects_small_time_budget_and_returns_valid_actions()
     print("crawler_engine smoke tests passed")

@@ -3,8 +3,6 @@
 // High-level C++ facade used by the Python binding. It wires observation updates,
 // belief determinization, and current action selection together.
 
-#include <algorithm>
-
 namespace crawler {
 
 // Construct an empty engine. The player-specific constructor sets ownership after
@@ -51,34 +49,6 @@ BoardState Engine::determinize(uint64_t seed) const {
     }
     sampled.rebuild_active_bitboards();
     return sampled;
-}
-
-// Current policy placeholder touches macro generation to keep that path live,
-// then falls back to deterministic primitive heuristics.
-ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
-    (void)seed;
-    const int rollout_budget = std::max(1, std::min(MAX_TREE_NODES, time_budget_ms * 2));
-    int macro_touch_count = 0;
-    for (int i = 0; i < sim.state.robots.used && macro_touch_count < rollout_budget; ++i) {
-        if (sim.state.robots.alive[static_cast<size_t>(i)] == 0 ||
-            sim.state.robots.owner[static_cast<size_t>(i)] != sim.state.player) {
-            continue;
-        }
-        const MacroList macros = sim.generate_macros_for(i);
-        macro_touch_count += macros.count;
-    }
-
-    ActionResult result{};
-    result.clear();
-    for (int i = 0; i < sim.state.robots.used; ++i) {
-        if (sim.state.robots.alive[static_cast<size_t>(i)] == 0 ||
-            sim.state.robots.owner[static_cast<size_t>(i)] != sim.state.player) {
-            continue;
-        }
-        const Action action = sim.heuristic_action_for(i);
-        result.add(sim.state.robots.uid[static_cast<size_t>(i)].data(), action);
-    }
-    return result;
 }
 
 }  // namespace crawler
