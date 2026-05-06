@@ -294,7 +294,7 @@ int RobotStore::add_robot(std::string_view uid_value, uint8_t robot_type, uint8_
     owner[static_cast<size_t>(slot)] = robot_owner;
     col[static_cast<size_t>(slot)] = static_cast<int16_t>(robot_col);
     row[static_cast<size_t>(slot)] = static_cast<int16_t>(robot_row);
-    energy[static_cast<size_t>(slot)] = static_cast<int16_t>(robot_energy);
+    energy[static_cast<size_t>(slot)] = robot_energy;
     move_cd[static_cast<size_t>(slot)] = static_cast<int16_t>(move_cooldown);
     jump_cd[static_cast<size_t>(slot)] = static_cast<int16_t>(jump_cooldown);
     build_cd[static_cast<size_t>(slot)] = static_cast<int16_t>(build_cooldown);

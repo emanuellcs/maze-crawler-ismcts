@@ -165,7 +165,7 @@ struct RobotStore {
     std::array<uint8_t, MAX_ROBOTS> owner{};
     std::array<int16_t, MAX_ROBOTS> col{};
     std::array<int16_t, MAX_ROBOTS> row{};
-    std::array<int16_t, MAX_ROBOTS> energy{};
+    std::array<int32_t, MAX_ROBOTS> energy{};
     std::array<int16_t, MAX_ROBOTS> move_cd{};
     std::array<int16_t, MAX_ROBOTS> jump_cd{};
     std::array<int16_t, MAX_ROBOTS> build_cd{};
@@ -378,6 +378,7 @@ public:
     void step_actions(const PrimitiveActions& actions);
     [[nodiscard]] BoardState determinize(uint64_t seed) const;
     [[nodiscard]] ActionResult choose_actions(int time_budget_ms, uint64_t seed);
+    [[nodiscard]] float debug_mcts_value(int player) const;
 };
 
 }  // namespace crawler

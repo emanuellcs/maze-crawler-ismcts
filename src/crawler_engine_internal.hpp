@@ -26,6 +26,7 @@ int cell_col(int abs_index);
 
 // Shared map/rule helpers used by the simulator and belief determinizer.
 int scroll_interval(int step);
+int scroll_counter_at_step(int step);
 void set_or_clear_wall(BoardState& state, int c, int r, Direction direction, bool set_wall);
 void generate_optimistic_row(BoardState& state, int row, uint64_t seed);
 

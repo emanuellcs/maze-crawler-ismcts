@@ -80,6 +80,18 @@ int scroll_interval(int step) {
     return std::max(SCROLL_END_INTERVAL, py_round_interval(value));
 }
 
+int scroll_counter_at_step(int step) {
+    int counter = SCROLL_START_INTERVAL;
+    const int clamped_step = std::max(0, std::min(step, EPISODE_STEPS));
+    for (int s = 0; s < clamped_step; ++s) {
+        --counter;
+        if (counter <= 0) {
+            counter = scroll_interval(s);
+        }
+    }
+    return std::max(1, counter);
+}
+
 void set_or_clear_wall(BoardState& state, int c, int r, Direction direction, bool set_wall) {
     const int idx = state.abs_index(c, r);
     if (idx < 0) {

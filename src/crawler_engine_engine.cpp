@@ -32,6 +32,7 @@ void Engine::step_actions(const PrimitiveActions& actions) {
 // live robots from the latest observation.
 BoardState Engine::determinize(uint64_t seed) const {
     BoardState sampled = belief.determinize(seed);
+    sampled.scroll_counter = sim.state.scroll_counter;
     for (int i = 0; i < sim.state.robots.used; ++i) {
         if (sim.state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;

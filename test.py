@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import tarfile
+import tempfile
 import time
 
 import numpy as np
 
 import crawler_engine
+import package_submission
 
 
 WIDTH = 20
@@ -143,6 +149,64 @@ def test_transfer_drains_source_and_caps_target():
     assert worker["energy"] == 0
 
 
+def test_transfer_to_factory_does_not_overflow_int16_range():
+    robots = {
+        "f0": [0, 5, 5, 40000, 0, 0, 0, 0],
+        "w0": [2, 5, 6, 300, 0, 0, 0, 0],
+    }
+    engine = make_engine(robots)
+    engine.step({"w0": "TRANSFER_SOUTH"})
+    state = engine.debug_state()
+    factory = robot_by_uid(state, "f0")
+    worker = robot_by_uid(state, "w0")
+    assert factory["energy"] == 40298
+    assert worker["energy"] == 0
+
+
+def test_factory_spawn_is_stationary_combat_participant():
+    robots = {
+        "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
+        "w1": [2, 5, 4, 300, 1, 0, 0, 0],
+    }
+    engine = make_engine(robots)
+    engine.step({"f0": "BUILD_SCOUT", "w1": "SOUTH"})
+    state = engine.debug_state()
+    enemy_worker = robot_by_uid(state, "w1")
+    assert enemy_worker["row"] == 3
+    assert not any(r["owner"] == 0 and r["type"] == 1 and r["row"] == 3 for r in state["robotList"])
+
+
+def test_scroll_counter_reconstructed_for_high_step_observation():
+    robots = {
+        "f0": [0, 5, 0, 1000, 0, 0, 0, 0],
+        "f1": [0, 14, 5, 1000, 1, 0, 0, 0],
+    }
+    engine = make_engine(robots, step=400)
+    engine.step({})
+    state = engine.debug_state()
+    assert state["southBound"] == 1
+    assert not any(r["uid"] == "f0" for r in state["robotList"])
+
+
+def test_mcts_tiebreak_value_uses_energy_margin():
+    high_margin = make_engine(
+        {
+            "f0": [0, 5, 5, 2000, 0, 0, 0, 0],
+            "f1": [0, 14, 5, 1000, 1, 0, 0, 0],
+        },
+        step=500,
+    )
+    low_margin = make_engine(
+        {
+            "f0": [0, 5, 5, 1200, 0, 0, 0, 0],
+            "f1": [0, 14, 5, 1000, 1, 0, 0, 0],
+        },
+        step=500,
+    )
+    assert high_margin.debug_mcts_value(0) > low_margin.debug_mcts_value(0) > 0.0
+    assert high_margin.debug_mcts_value(1) < 0.0
+
+
 def test_period_two_move_cooldown_blocks_next_turn():
     robots = {
         "f0": [0, 2, 2, 1000, 0, 0, 0, 0],
@@ -222,6 +286,47 @@ def test_mcts_respects_small_time_budget_and_returns_valid_actions():
     assert set(actions.values()) <= VALID_ACTIONS
 
 
+def test_packaged_submission_jit_compiles_in_extracted_directory():
+    package_path = package_submission.build_package()
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        with tarfile.open(package_path, "r:gz") as tar:
+            tar.extractall(tmp, filter="data")
+        smoke = subprocess.run(
+            [sys.executable, "main.py"],
+            cwd=tmp,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert smoke.returncode == 0, smoke.stdout + smoke.stderr
+        assert "crawler_engine native available: True" in smoke.stdout
+
+        call = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from types import SimpleNamespace\n"
+                "from main import agent\n"
+                "obs = SimpleNamespace(player=0, walls=[0] * 400, crystals={}, "
+                "robots={'f0': [0, 5, 2, 1000, 0, 0, 0, 0]}, mines={}, "
+                "miningNodes={}, southBound=0, northBound=19, step=0)\n"
+                "config = SimpleNamespace(width=20, workerCost=200, wallRemoveCost=100)\n"
+                "actions = agent(obs, config)\n"
+                "assert 'f0' in actions\n"
+                "print(actions)\n",
+            ],
+            cwd=tmp,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert call.returncode == 0, call.stdout + call.stderr
+
+
 if __name__ == "__main__":
     test_bridge_smoke()
     test_factory_build_spawn_before_combat()
@@ -229,9 +334,14 @@ if __name__ == "__main__":
     test_enemy_factories_mutually_annihilate()
     test_worker_crushes_scout_and_gets_crystal()
     test_transfer_drains_source_and_caps_target()
+    test_transfer_to_factory_does_not_overflow_int16_range()
+    test_factory_spawn_is_stationary_combat_participant()
+    test_scroll_counter_reconstructed_for_high_step_observation()
+    test_mcts_tiebreak_value_uses_energy_margin()
     test_period_two_move_cooldown_blocks_next_turn()
     test_jump_sets_move_and_jump_cooldowns()
     test_fixed_center_wall_remove_costs_but_does_not_open()
     test_offboard_jump_death()
     test_mcts_respects_small_time_budget_and_returns_valid_actions()
+    test_packaged_submission_jit_compiles_in_extracted_directory()
     print("crawler_engine smoke tests passed")

@@ -228,6 +228,10 @@ public:
         return board_summary(engine.sim.state);
     }
 
+    float debug_mcts_value(int player = -1) const {
+        return engine.debug_mcts_value(player);
+    }
+
 private:
     crawler::Engine engine;
 };
@@ -248,6 +252,7 @@ PYBIND11_MODULE(crawler_engine, m) {
              py::arg("seed") = 0)
         .def("step", &PyEngine::step, py::arg("actions"))
         .def("determinize", &PyEngine::determinize, py::arg("seed") = 0)
+        .def("debug_mcts_value", &PyEngine::debug_mcts_value, py::arg("player") = -1)
         .def("debug_state", &PyEngine::debug_state);
 
     m.def("action_name", [](int action) {

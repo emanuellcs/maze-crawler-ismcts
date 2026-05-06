@@ -23,6 +23,14 @@ struct PlanCandidate {
     std::array<MacroAction, MAX_MCTS_PLAN_ROBOTS> macro{};
 };
 
+struct EvalStats {
+    std::array<int64_t, 2> energy{0, 0};
+    std::array<int, 2> units{0, 0};
+    std::array<int, 2> material{0, 0};
+    std::array<int, 2> factories{0, 0};
+    std::array<int, 2> best_factory_row{0, 0};
+};
+
 bool can_pay_after_drain_local(int energy, int cost) {
     return energy >= cost + ENERGY_PER_TURN;
 }
@@ -285,21 +293,8 @@ void apply_node_plan(CrawlerSim& sim, const MCTSNode& node, int root_player) {
 
 float evaluate_state(const BoardState& state, int root_player) {
     const int opponent = 1 - root_player;
-    if (state.done) {
-        if (state.winner == root_player) {
-            return 1.0F;
-        }
-        if (state.winner == opponent) {
-            return -1.0F;
-        }
-        return 0.0F;
-    }
-
-    std::array<int, 2> energy{0, 0};
-    std::array<int, 2> units{0, 0};
-    std::array<int, 2> material{0, 0};
-    std::array<int, 2> factories{0, 0};
-    std::array<int, 2> best_factory_row{state.south_bound - 1, state.south_bound - 1};
+    EvalStats stats{};
+    stats.best_factory_row = {state.south_bound - 1, state.south_bound - 1};
 
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
@@ -310,38 +305,53 @@ float evaluate_state(const BoardState& state, int root_player) {
             continue;
         }
         const uint8_t type = state.robots.type[static_cast<size_t>(i)];
-        energy[static_cast<size_t>(owner)] += state.robots.energy[static_cast<size_t>(i)];
-        ++units[static_cast<size_t>(owner)];
-        material[static_cast<size_t>(owner)] += type == FACTORY ? 8 : static_cast<int>(type);
+        stats.energy[static_cast<size_t>(owner)] += state.robots.energy[static_cast<size_t>(i)];
+        ++stats.units[static_cast<size_t>(owner)];
+        stats.material[static_cast<size_t>(owner)] += type == FACTORY ? 8 : static_cast<int>(type);
         if (type == FACTORY) {
-            ++factories[static_cast<size_t>(owner)];
-            best_factory_row[static_cast<size_t>(owner)] =
-                std::max(best_factory_row[static_cast<size_t>(owner)], static_cast<int>(state.robots.row[static_cast<size_t>(i)]));
+            ++stats.factories[static_cast<size_t>(owner)];
+            stats.best_factory_row[static_cast<size_t>(owner)] =
+                std::max(stats.best_factory_row[static_cast<size_t>(owner)],
+                         static_cast<int>(state.robots.row[static_cast<size_t>(i)]));
         }
     }
 
-    if (factories[static_cast<size_t>(root_player)] == 0) {
+    const int64_t energy_diff = stats.energy[static_cast<size_t>(root_player)] -
+                                stats.energy[static_cast<size_t>(opponent)];
+    const int unit_diff = stats.units[static_cast<size_t>(root_player)] -
+                          stats.units[static_cast<size_t>(opponent)];
+    const bool root_dead = stats.factories[static_cast<size_t>(root_player)] == 0;
+    const bool opponent_dead = stats.factories[static_cast<size_t>(opponent)] == 0;
+    const bool tiebreak_terminal = (state.done && root_dead == opponent_dead) || state.step >= EPISODE_STEPS - 1;
+    if (tiebreak_terminal) {
+        if (energy_diff != 0) {
+            return std::clamp(std::tanh(static_cast<float>(energy_diff) / 800.0F), -1.0F, 1.0F);
+        }
+        if (unit_diff != 0) {
+            return std::clamp(std::tanh(static_cast<float>(unit_diff) / 4.0F), -1.0F, 1.0F);
+        }
+        return 0.0F;
+    }
+
+    if (root_dead) {
         return -1.0F;
     }
-    if (factories[static_cast<size_t>(opponent)] == 0) {
+    if (opponent_dead) {
         return 1.0F;
     }
 
     const float energy_score =
-        std::tanh(static_cast<float>(energy[static_cast<size_t>(root_player)] -
-                                     energy[static_cast<size_t>(opponent)]) / 1000.0F);
+        std::tanh(static_cast<float>(energy_diff) / 1000.0F);
     const float material_score =
-        std::tanh(static_cast<float>(material[static_cast<size_t>(root_player)] -
-                                     material[static_cast<size_t>(opponent)]) / 10.0F);
-    const float unit_score =
-        std::tanh(static_cast<float>(units[static_cast<size_t>(root_player)] -
-                                     units[static_cast<size_t>(opponent)]) / 8.0F);
+        std::tanh(static_cast<float>(stats.material[static_cast<size_t>(root_player)] -
+                                     stats.material[static_cast<size_t>(opponent)]) / 10.0F);
+    const float unit_score = std::tanh(static_cast<float>(unit_diff) / 8.0F);
     const float progress_score =
-        std::tanh(static_cast<float>(best_factory_row[static_cast<size_t>(root_player)] -
-                                     best_factory_row[static_cast<size_t>(opponent)]) / 8.0F);
+        std::tanh(static_cast<float>(stats.best_factory_row[static_cast<size_t>(root_player)] -
+                                     stats.best_factory_row[static_cast<size_t>(opponent)]) / 8.0F);
     const float margin_score =
-        std::tanh(static_cast<float>((best_factory_row[static_cast<size_t>(root_player)] - state.south_bound) -
-                                     (best_factory_row[static_cast<size_t>(opponent)] - state.south_bound)) / 8.0F);
+        std::tanh(static_cast<float>((stats.best_factory_row[static_cast<size_t>(root_player)] - state.south_bound) -
+                                     (stats.best_factory_row[static_cast<size_t>(opponent)] - state.south_bound)) / 8.0F);
 
     return std::clamp(0.55F * energy_score + 0.20F * material_score + 0.10F * unit_score +
                           0.10F * progress_score + 0.05F * margin_score,
@@ -514,6 +524,11 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
         return build_result_from_plan(sim, nullptr);
     }
     return build_result_from_plan(sim, &mcts.nodes[static_cast<size_t>(best_child)]);
+}
+
+float Engine::debug_mcts_value(int player) const {
+    const int eval_player = (player == 0 || player == 1) ? player : sim.state.player;
+    return evaluate_state(sim.state, eval_player);
 }
 
 }  // namespace crawler
