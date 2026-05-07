@@ -1,22 +1,31 @@
-"""Optuna hyperparameter tuning for the C++ Crawl engine.
+"""Optuna tuning against the strong `opponent.py` benchmark.
 
-Each trial evaluates a candidate parameter dictionary against the compiled-in
-defaults. Games are run in both player orders for every seed, and the objective
-is the average final energy margin from the candidate's perspective.
+Each trial samples C++ ISMCTS hyperparameters, injects them into a fresh
+`crawler_engine.Engine` wrapper, and evaluates the candidate against the
+leaderboard-grade Python opponent on paired seeds with side swapping.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import importlib
+import importlib.util
+import logging
 import os
+import sys
+import traceback
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import optuna
 from kaggle_environments import make
 
-import crawler_engine
+ROOT = Path(__file__).resolve().parent
+OPPONENT_PATH = ROOT / "opponent.py"
+LOGGER = logging.getLogger("tune")
+FAIL_MARGIN = -1.0e9
 
 MACRO_PRIOR_KEYS = (
     "IDLE",
@@ -44,6 +53,7 @@ class EvalConfig:
     base_seed: int
     time_budget_ms: int
     debug: bool
+    fail_value: float
 
 
 def _get(obj: Any, name: str, default: Any = None) -> Any:
@@ -62,27 +72,72 @@ def _engine_seed(step: int, player: int, game_seed: int) -> int:
     )
 
 
-class EngineAgent:
-    """Kaggle-compatible callable that owns C++ engines for one environment run."""
+def _load_crawler_engine() -> Any:
+    """Import crawler_engine, falling back to main.py's JIT compiler if needed."""
+
+    try:
+        return importlib.import_module("crawler_engine")
+    except Exception as first_exc:
+        try:
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            main = importlib.import_module("main")
+            ensure_native = getattr(main, "_ensure_native_engine", None)
+            if ensure_native is None or not ensure_native():
+                raise RuntimeError("main._ensure_native_engine() failed")
+            module = getattr(main, "crawler_engine", None)
+            return (
+                module
+                if module is not None
+                else importlib.import_module("crawler_engine")
+            )
+        except Exception as second_exc:
+            raise RuntimeError(
+                "could not import or JIT-compile crawler_engine\n"
+                f"initial import error: {first_exc}\n"
+                f"fallback error: {second_exc}"
+            ) from second_exc
+
+
+def _load_opponent_agent() -> Callable[[Any, Any], dict[str, str]]:
+    """Load opponent.py without mutating it or relying on package installation."""
+
+    if not OPPONENT_PATH.exists():
+        raise RuntimeError(f"opponent.py not found at {OPPONENT_PATH}")
+    spec = importlib.util.spec_from_file_location(
+        "maze_crawler_tuning_opponent", OPPONENT_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not create import spec for {OPPONENT_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    agent = getattr(module, "agent", None)
+    if agent is None or not callable(agent):
+        raise RuntimeError("opponent.py must expose callable agent(obs, config)")
+    return agent
+
+
+class CandidateAgent:
+    """Kaggle-compatible callable that owns fresh C++ engines for one match."""
 
     def __init__(
         self,
-        hyperparameters: dict[str, float | int] | None,
+        hyperparameters: dict[str, float | int],
         time_budget_ms: int,
         game_seed: int,
     ):
         self.hyperparameters = hyperparameters
         self.time_budget_ms = time_budget_ms
         self.game_seed = game_seed
-        self.engines: dict[int, crawler_engine.Engine] = {}
+        self.crawler_engine = _load_crawler_engine()
+        self.engines: dict[int, Any] = {}
 
     def __call__(self, obs: Any, config: Any) -> dict[str, str]:
         player = int(_get(obs, "player", 0))
         engine = self.engines.get(player)
         if engine is None:
-            engine = crawler_engine.Engine(player)
-            if self.hyperparameters is not None:
-                engine.set_hyperparameters(self.hyperparameters)
+            engine = self.crawler_engine.Engine(player)
+            engine.set_hyperparameters(self.hyperparameters)
             self.engines[player] = engine
 
         step = int(_get(obs, "step", -1))
@@ -102,8 +157,27 @@ class EngineAgent:
         )
 
 
+def make_candidate_agent(
+    hyperparameters: dict[str, float | int], time_budget_ms: int, game_seed: int
+) -> Callable[[Any, Any], dict[str, str]]:
+    """Factory required by tuning workers to build a fresh C++ candidate agent."""
+
+    return CandidateAgent(hyperparameters, time_budget_ms, game_seed)
+
+
+def make_opponent_agent() -> Callable[[Any, Any], dict[str, str]]:
+    """Factory for a fresh opponent wrapper per match."""
+
+    opponent_agent = _load_opponent_agent()
+
+    def agent(obs: Any, config: Any) -> dict[str, str]:
+        return opponent_agent(obs, config)
+
+    return agent
+
+
 def suggest_hyperparameters(trial: optuna.trial.Trial) -> dict[str, float | int]:
-    """Sample the first production tuning surface exposed by pybind11."""
+    """Sample the C++ hyperparameter surface exposed through pybind11."""
 
     params: dict[str, float | int] = {
         "C_puct": trial.suggest_float("C_puct", 0.5, 3.0),
@@ -135,57 +209,76 @@ def _final_own_energy(final_state: Any, owner: int) -> int:
     return total
 
 
+def _state_failed(final_state: Any) -> bool:
+    """Detect common Kaggle agent failure statuses without depending on enums."""
+
+    status = str(_get(final_state, "status", "")).upper()
+    return any(token in status for token in ("ERROR", "INVALID", "TIMEOUT"))
+
+
 def run_match(
     params: dict[str, float | int], seed: int, candidate_player: int, config: EvalConfig
 ) -> float:
-    """Run one candidate-vs-baseline game and return candidate energy margin."""
+    """Run one candidate-vs-opponent game and return candidate energy margin."""
 
-    baseline_player = 1 - candidate_player
-    agents = [None, None]
-    agents[candidate_player] = EngineAgent(params, config.time_budget_ms, seed)
-    agents[baseline_player] = EngineAgent(None, config.time_budget_ms, seed)
+    opponent_player = 1 - candidate_player
+    agents: list[Callable[[Any, Any], dict[str, str]] | None] = [None, None]
+    agents[candidate_player] = make_candidate_agent(params, config.time_budget_ms, seed)
+    agents[opponent_player] = make_opponent_agent()
 
     env = make("crawl", configuration={"randomSeed": seed}, debug=config.debug)
     steps = env.run(agents)
     final = steps[-1]
-    energy = [
-        _final_own_energy(final[0], 0),
-        _final_own_energy(final[1], 1),
-    ]
-    return float(energy[candidate_player] - energy[baseline_player])
+
+    if _state_failed(final[candidate_player]):
+        return config.fail_value
+    if _state_failed(final[opponent_player]):
+        return -config.fail_value
+
+    candidate_energy = _final_own_energy(final[candidate_player], candidate_player)
+    opponent_energy = _final_own_energy(final[opponent_player], opponent_player)
+    return float(candidate_energy - opponent_energy)
 
 
 def evaluate_params(params: dict[str, float | int], config: EvalConfig) -> float:
-    """Average margins across seeds and swapped player order."""
+    """Average candidate margins across seeds and swapped player order."""
 
-    margins: list[float] = []
-    for offset in range(config.seeds):
-        seed = config.base_seed + offset
-        margins.append(run_match(params, seed, candidate_player=0, config=config))
-        margins.append(run_match(params, seed, candidate_player=1, config=config))
-    return sum(margins) / len(margins)
+    try:
+        margins: list[float] = []
+        for offset in range(config.seeds):
+            seed = config.base_seed + offset
+            margins.append(run_match(params, seed, candidate_player=0, config=config))
+            margins.append(run_match(params, seed, candidate_player=1, config=config))
+        return sum(margins) / len(margins)
+    except Exception as exc:
+        raise RuntimeError(
+            f"trial evaluation failed:\n{traceback.format_exc()}"
+        ) from exc
 
 
 def objective(trial: optuna.trial.Trial, config: EvalConfig) -> float:
-    """Single-process Optuna objective, kept for debugging and notebooks."""
+    """Optuna objective: sample params and return average opponent energy margin."""
 
     return evaluate_params(suggest_hyperparameters(trial), config)
 
 
-def _resolve_workers(workers: int) -> int:
-    if workers == -1:
-        return max(1, os.cpu_count() or 1)
-    if workers <= 0:
-        raise ValueError("--workers must be -1 or a positive integer")
-    return workers
+def _resolve_n_jobs(n_jobs: int, trials: int) -> int:
+    if n_jobs == -1:
+        n_jobs = os.cpu_count() or 1
+    if n_jobs <= 0:
+        raise ValueError("--n-jobs must be -1 or a positive integer")
+    return min(n_jobs, max(1, trials))
 
 
 def optimize(args: argparse.Namespace) -> optuna.Study:
+    """Run process-parallel Optuna ask/tell optimization."""
+
     config = EvalConfig(
         seeds=args.seeds,
         base_seed=args.base_seed,
-        time_budget_ms=args.time_budget_ms,
+        time_budget_ms=args.time_budget,
         debug=args.debug,
+        fail_value=args.fail_value,
     )
     sampler = optuna.samplers.TPESampler(seed=args.sampler_seed)
     study = optuna.create_study(
@@ -196,23 +289,31 @@ def optimize(args: argparse.Namespace) -> optuna.Study:
         sampler=sampler,
     )
 
-    workers = min(_resolve_workers(args.workers), max(1, args.trials))
+    n_jobs = _resolve_n_jobs(args.n_jobs, args.trials)
+    LOGGER.info(
+        "starting study=%s trials=%d n_jobs=%d seeds=%d time_budget_ms=%d storage=%s",
+        args.study_name,
+        args.trials,
+        n_jobs,
+        args.seeds,
+        args.time_budget,
+        args.storage,
+    )
+
     submitted = 0
     completed = 0
+    failed = 0
     in_flight: dict[concurrent.futures.Future[float], optuna.trial.Trial] = {}
 
     def submit_next(pool: concurrent.futures.ProcessPoolExecutor) -> None:
-        # ask/tell lets the parent keep Optuna storage ownership while workers
-        # run independent C++ engines in separate Python processes.
         nonlocal submitted
         trial = study.ask()
         params = suggest_hyperparameters(trial)
-        future = pool.submit(evaluate_params, params, config)
-        in_flight[future] = trial
+        in_flight[pool.submit(evaluate_params, params, config)] = trial
         submitted += 1
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
-        while submitted < min(workers, args.trials):
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_jobs) as pool:
+        while submitted < min(n_jobs, args.trials):
             submit_next(pool)
 
         while in_flight:
@@ -223,24 +324,36 @@ def optimize(args: argparse.Namespace) -> optuna.Study:
                 trial = in_flight.pop(future)
                 try:
                     value = future.result()
-                except Exception:
+                except Exception as exc:
+                    failed += 1
                     study.tell(trial, state=optuna.trial.TrialState.FAIL)
-                    raise
-
-                study.tell(trial, value)
-                completed += 1
-                print(
-                    f"trial={trial.number} value={value:.3f} completed={completed}/{args.trials}",
-                    flush=True,
-                )
+                    LOGGER.exception("trial=%d failed: %s", trial.number, exc)
+                else:
+                    completed += 1
+                    study.tell(trial, value)
+                    LOGGER.info(
+                        "trial=%d value=%.3f completed=%d/%d failed=%d",
+                        trial.number,
+                        value,
+                        completed,
+                        args.trials,
+                        failed,
+                    )
 
                 if submitted < args.trials:
                     submit_next(pool)
 
-    if len(study.trials) > 0:
+    complete_trials = [
+        trial
+        for trial in study.trials
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None
+    ]
+    if complete_trials:
         best = study.best_trial
-        print(f"best_trial={best.number} best_value={best.value:.3f}", flush=True)
-        print(f"best_params={best.params}", flush=True)
+        LOGGER.info("best_trial=%d best_value=%.3f", best.number, best.value)
+        LOGGER.info("best_params=%s", best.params)
+    else:
+        LOGGER.warning("no completed trials; inspect logs and failed trial states")
     return study
 
 
@@ -249,23 +362,34 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=100)
-    parser.add_argument("--workers", "--n-jobs", dest="workers", type=int, default=-1)
-    parser.add_argument("--seeds", type=int, default=5)
+    parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--base-seed", type=int, default=12345)
-    parser.add_argument("--time-budget-ms", type=int, default=50)
+    parser.add_argument("--time-budget", "--time-budget-ms", type=int, default=300)
+    parser.add_argument("--n-jobs", "--workers", dest="n_jobs", type=int, default=16)
     parser.add_argument("--storage", default="sqlite:///tune.db")
-    parser.add_argument("--study-name", default="crawl-hparams")
-    parser.add_argument("--sampler-seed", type=int, default=20240507)
+    parser.add_argument("--study-name", default="crawl-vs-opponent")
+    parser.add_argument("--sampler-seed", type=int, default=20260507)
+    parser.add_argument("--fail-value", type=float, default=FAIL_MARGIN)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     if args.trials <= 0:
         raise ValueError("--trials must be positive")
     if args.seeds <= 0:
         raise ValueError("--seeds must be positive")
-    if args.time_budget_ms <= 0:
-        raise ValueError("--time-budget-ms must be positive")
+    if args.time_budget <= 0:
+        raise ValueError("--time-budget must be positive")
     return args
 
 
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(processName)s %(name)s: %(message)s",
+    )
+    optimize(args)
+
+
 if __name__ == "__main__":
-    optimize(parse_args())
+    main()
