@@ -15,7 +15,7 @@ Completed:
 - Bounded macro-action expansion over joint plans instead of primitive action Cartesian products.
 - Continuous rollout evaluation with terminal tiebreaker energy-margin shaping.
 - Runtime hyperparameter injection from Python for PUCT, rollout depth, and macro priors.
-- Process-parallel Optuna self-play tuner for candidate-versus-baseline evaluation.
+- Process-parallel Optuna tuner for candidate-versus-`opponent.py` evaluation.
 - `int32_t` robot energy storage and factory capacity handling.
 - Spawn-combat, transfer, fixed-wall, jump/offboard, cooldown, mine, crystal, reward, and scrolling rule edge cases covered by tests.
 - Kaggle source-bundle packaging with vendored `pybind11` headers.
@@ -36,9 +36,10 @@ Remaining work is empirical rather than structural:
 ├── main.py                     # Kaggle agent entrypoint with JIT native build
 ├── package_submission.py       # Builds source bundle with vendored pybind11
 ├── submission.py               # Local alias for main.agent
+├── opponent.py                 # Strong Python benchmark agent used by tune.py
 ├── requirements-dev.txt        # Build/test dependencies
 ├── test.py                     # Rule, MCTS, bridge, and package smoke tests
-├── tune.py                     # Optuna self-play hyperparameter tuner
+├── tune.py                     # Optuna opponent-backed hyperparameter tuner
 ├── rules/                      # Competition rule reference and notes
 └── src/
     ├── bindings.cpp            # pybind11 observation/action bridge
@@ -404,33 +405,68 @@ Debug/test helpers:
 
 ## Hyperparameter Tuning
 
-`tune.py` runs Bayesian optimization with Optuna over self-play matches against the compiled default baseline. Each trial:
+`tune.py` runs Bayesian optimization with Optuna against the strong root-level `opponent.py` benchmark. Each trial:
 
 1. Samples `C_puct`, `baseline_prior_multiplier`, `rollout_depth`, and macro priors.
-2. Runs the candidate against the baseline on each configured seed.
-3. Swaps player order for every seed.
-4. Returns the average final energy margin from the candidate perspective.
+2. Builds fresh Kaggle-compatible candidate wrappers around `crawler_engine.Engine`.
+3. Injects the sampled parameters with `engine.set_hyperparameters(params)`.
+4. Runs the candidate against `opponent.py` on each configured seed.
+5. Swaps player order for every seed.
+6. Returns the average final energy margin from the candidate perspective.
 
 The score is:
 
 ```text
-candidate_total_energy - baseline_total_energy
+candidate_total_energy - opponent_total_energy
 ```
 
-Final energy is read from each owner player's final observation because enemy robots can be hidden by fog of war. A positive score means the candidate ended ahead of the baseline on average.
+Final energy is read from each owner player's final observation because enemy robots can be hidden by fog of war. A positive score means the candidate ended ahead of `opponent.py` on average.
 
-The tuner uses `ProcessPoolExecutor` instead of Optuna thread parallelism. Each worker process creates its own Python agents and C++ `Engine` instances, so mutable search state and pybind objects are not shared between workers.
+The tuner uses `ProcessPoolExecutor` with Optuna `ask`/`tell` instead of thread parallelism. Each worker process creates its own Python agents and C++ `Engine` instances, so mutable search state and pybind objects are not shared between workers.
+
+### Tuning Host Profile
+
+The default tuning settings target this local workstation:
+
+```text
+CPU: Intel Core i7-12700
+Core layout: 12 total cores = 8 Performance-cores + 4 Efficient-cores
+Threads: 20 total with Intel Hyper-Threading
+Max turbo: 4.90 GHz
+Intel Turbo Boost Max Technology 3.0 frequency: 4.90 GHz
+Performance-core max/base: 4.80 GHz / 2.10 GHz
+Efficient-core max/base: 3.60 GHz / 1.60 GHz
+Cache: 25 MB Intel Smart Cache
+Total L2 cache: 12 MB
+Memory: 16 GB DDR4
+Instruction set: 64-bit
+Instruction extensions: SSE4.1, SSE4.2, AVX2
+Scheduling/power features: Intel Thread Director, Speed Shift, Enhanced SpeedStep, idle states
+Other CPU features: Intel DL Boost, Gaussian & Neural Accelerator 3.0, Optane Memory support
+```
+
+The default `--n-jobs 16` is intentionally below the 20 hardware threads. It keeps the 8 P-cores and most logical threads busy while leaving headroom for the OS, SQLite writes, Python/Kaggle environment overhead, and the 16 GB RAM limit. If the machine starts swapping or SQLite latency rises, reduce to `--n-jobs 12`; if CPU utilization is low and memory is stable, test `--n-jobs 18`.
+
+The study persists to SQLite by default:
+
+```text
+sqlite:///tune.db
+```
+
+That makes long runs pause/resume safe: rerun the same command with the same `--storage` and `--study-name`.
+
+If the native extension cannot be imported, `tune.py` tries the same JIT path used by `main.py`. A trial-level import, compile, or agent error is logged and marked failed instead of terminating the whole study.
 
 Smoke run:
 
 ```bash
 PYTHONPATH=build /tmp/maze-crawler-venv/bin/python tune.py \
-  --trials 2 \
-  --workers 2 \
+  --trials 1 \
+  --n-jobs 1 \
   --seeds 1 \
-  --time-budget-ms 10 \
-  --storage sqlite:////tmp/maze-crawler-tune-smoke.db \
-  --study-name smoke
+  --time-budget 10 \
+  --storage sqlite:////tmp/maze-crawler-opponent-smoke.db \
+  --study-name opponent-smoke
 ```
 
 Production-style run:
@@ -438,11 +474,22 @@ Production-style run:
 ```bash
 PYTHONPATH=build /tmp/maze-crawler-venv/bin/python tune.py \
   --trials 1000 \
-  --workers -1 \
+  --n-jobs 16 \
   --seeds 5 \
-  --time-budget-ms 50 \
+  --time-budget 300 \
   --storage sqlite:///tune.db \
-  --study-name crawl-hparams
+  --study-name crawl-vs-opponent
+```
+
+Important CLI defaults:
+
+```text
+--trials 100
+--seeds 3
+--time-budget 300
+--n-jobs 16
+--storage sqlite:///tune.db
+--study-name crawl-vs-opponent
 ```
 
 Default search ranges:
@@ -620,12 +667,13 @@ The remaining roadmap is data science and empirical optimization:
 - Evaluation:
   - deterministic seed suites
   - large-scale self-play
+  - candidate-versus-`opponent.py` production studies
   - macro-prior ablations
   - rollout-depth ablations
   - best-parameter confidence intervals
   - opponent-policy robustness tests
 
-Core engine implementation, rule fidelity, fixed-arena search, Kaggle JIT deployment, and the first Optuna tuning loop are complete.
+Core engine implementation, rule fidelity, fixed-arena search, Kaggle JIT deployment, and the opponent-backed Optuna tuning loop are complete.
 
 ## License
 
