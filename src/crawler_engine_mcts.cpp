@@ -15,6 +15,7 @@ namespace {
 
 constexpr uint64_t ITERATION_SEED = 0x9e3779b97f4a7c15ULL;
 
+// One root child represents a bounded joint macro plan for the controlled side.
 struct PlanCandidate {
     int plan_count = 0;
     float prior = 1.0F;
@@ -22,6 +23,7 @@ struct PlanCandidate {
     std::array<MacroAction, MAX_MCTS_PLAN_ROBOTS> macro{};
 };
 
+// Compact aggregate features used by the rollout evaluator.
 struct EvalStats {
     std::array<int64_t, 2> energy{0, 0};
     std::array<int, 2> units{0, 0};
@@ -102,6 +104,8 @@ MacroAction default_macro_for_robot(const BoardState& state, int robot_index, in
     return MACRO_IDLE;
 }
 
+// Average per-robot macro priors into a joint-plan prior. Candidate priors are
+// normalized during expansion, so absolute scale only matters before that step.
 float candidate_prior(const Hyperparameters& hyperparameters, const PlanCandidate& candidate) {
     if (candidate.plan_count <= 0) {
         return 0.10F;
@@ -125,6 +129,8 @@ int collect_controlled_robots(const BoardState& state, int owner,
     return count;
 }
 
+// Build the baseline joint plan plus one-robot deviations. This is the primary
+// branching control that keeps MCTS bounded under large unit counts.
 int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparameters& hyperparameters,
                         std::array<PlanCandidate, MAX_MCTS_CANDIDATES>& candidates) {
     std::array<int, MAX_MCTS_PLAN_ROBOTS> controlled{};
@@ -164,6 +170,8 @@ int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparam
     return count;
 }
 
+// Copy UID-keyed plans into tree nodes so sampled determinizations can replay
+// the same action history even when simulator-local robot slots differ.
 void copy_candidate_to_node(const PlanCandidate& candidate, MCTSNode& node) {
     node.plan_count = candidate.plan_count;
     for (int i = 0; i < candidate.plan_count; ++i) {
@@ -338,6 +346,8 @@ float evaluate_state(const BoardState& state, int root_player) {
                       -1.0F, 1.0F);
 }
 
+// Rollouts deliberately use deterministic heuristics for both players; all
+// stochasticity enters through determinization, not through playout policy RNG.
 float rollout(CrawlerSim& sim, int root_player, int rollout_depth) {
     PrimitiveActions actions{};
     for (int depth = 0; depth < rollout_depth && !sim.state.done; ++depth) {

@@ -302,9 +302,13 @@ struct MacroList {
 // Tunable search parameters. Defaults must match the hardcoded engine behavior
 // used before Python-side tuning was introduced.
 struct Hyperparameters {
+    // Exploration strength in PUCT child selection.
     float C_puct = 1.35F;
+    // Extra prior mass assigned to the deterministic all-robot baseline plan.
     float baseline_prior_multiplier = 1.35F;
+    // Heuristic rollout horizon after tree traversal.
     int rollout_depth = MCTS_ROLLOUT_DEPTH;
+    // Indexed by MacroAction. Unused slots keep the conservative idle default.
     std::array<float, MAX_MACROS> macro_prior{};
 
     Hyperparameters();

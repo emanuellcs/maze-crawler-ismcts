@@ -1,5 +1,9 @@
 #pragma once
 
+// Internal helper API shared by simulator, belief, policy, and search modules.
+// Keep declarations here low-level and deterministic; public bindings belong in
+// crawler_engine.hpp and bindings.cpp.
+
 #include "crawler_engine.hpp"
 
 #include <array>

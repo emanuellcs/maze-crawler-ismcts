@@ -33,6 +33,8 @@ constexpr std::array<crawler::MacroAction, 14> HYPERPARAMETER_MACROS{
     crawler::MACRO_MINER_TRANSFORM,
 };
 
+// Tunable keys intentionally mirror macro_action_name() without the MACRO_
+// prefix, so Python search spaces can be human-readable and typo-checked.
 void require_positive_finite(const std::string& key, double value) {
     if (!std::isfinite(value) || value <= 0.0) {
         throw py::value_error(key + " must be a positive finite number");

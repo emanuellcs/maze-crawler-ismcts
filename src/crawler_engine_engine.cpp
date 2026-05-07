@@ -10,6 +10,8 @@ Hyperparameters::Hyperparameters() {
 }
 
 void Hyperparameters::reset_macro_priors() {
+    // Defaults reproduce the original anonymous-namespace constants from the
+    // MCTS implementation. Keep this table synchronized with README tuning docs.
     macro_prior.fill(0.20F);
     macro_prior[static_cast<size_t>(MACRO_IDLE)] = 0.20F;
     macro_prior[static_cast<size_t>(MACRO_FACTORY_SAFE_ADVANCE)] = 1.00F;

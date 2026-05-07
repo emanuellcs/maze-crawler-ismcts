@@ -1,3 +1,5 @@
+"""Regression tests for rules fidelity, search behavior, pybind, and packaging."""
+
 from __future__ import annotations
 
 import os
@@ -46,6 +48,8 @@ VALID_ACTIONS = {
 
 
 def open_walls():
+    """Build a deterministic mostly-open wall array with fixed border/center walls."""
+
     walls = np.zeros(WIDTH * HEIGHT, dtype=np.int16)
     for r in range(HEIGHT):
         walls[r * WIDTH] |= WALL_W
@@ -58,6 +62,8 @@ def open_walls():
 
 
 def make_engine(robots, walls=None, crystals=None, mines=None, nodes=None, step=0):
+    """Create an engine from a compact Kaggle-style observation fixture."""
+
     engine = crawler_engine.Engine(0)
     engine.update_observation(
         0,
@@ -74,6 +80,8 @@ def make_engine(robots, walls=None, crystals=None, mines=None, nodes=None, step=
 
 
 def robot_by_uid(state, uid):
+    """Find a robot in debug_state output and fail with a useful test message."""
+
     for robot in state["robotList"]:
         if robot["uid"] == uid:
             return robot

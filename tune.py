@@ -1,4 +1,9 @@
-"""Optuna hyperparameter tuning for the C++ Crawl engine."""
+"""Optuna hyperparameter tuning for the C++ Crawl engine.
+
+Each trial evaluates a candidate parameter dictionary against the compiled-in
+defaults. Games are run in both player orders for every seed, and the objective
+is the average final energy margin from the candidate's perspective.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +38,8 @@ MACRO_PRIOR_KEYS = (
 
 @dataclass(frozen=True)
 class EvalConfig:
+    """Serializable match settings passed to process-pool workers."""
+
     seeds: int
     base_seed: int
     time_budget_ms: int
@@ -40,18 +47,24 @@ class EvalConfig:
 
 
 def _get(obj: Any, name: str, default: Any = None) -> Any:
+    """Read fields from either Kaggle objects or dict-like test stubs."""
+
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
 
 
 def _engine_seed(step: int, player: int, game_seed: int) -> int:
+    """Derive deterministic per-turn search seeds without sharing RNG state."""
+
     return ((step + 1) * 1_315_423_911 + player + game_seed * 2_654_435_761) & (
         (1 << 64) - 1
     )
 
 
 class EngineAgent:
+    """Kaggle-compatible callable that owns C++ engines for one environment run."""
+
     def __init__(
         self,
         hyperparameters: dict[str, float | int] | None,
@@ -90,6 +103,8 @@ class EngineAgent:
 
 
 def suggest_hyperparameters(trial: optuna.trial.Trial) -> dict[str, float | int]:
+    """Sample the first production tuning surface exposed by pybind11."""
+
     params: dict[str, float | int] = {
         "C_puct": trial.suggest_float("C_puct", 0.5, 3.0),
         "baseline_prior_multiplier": trial.suggest_float(
@@ -104,6 +119,13 @@ def suggest_hyperparameters(trial: optuna.trial.Trial) -> dict[str, float | int]
 
 
 def _final_own_energy(final_state: Any, owner: int) -> int:
+    """Read final energy from the owning player's observation.
+
+    Enemy robots are fogged, so player 0's final observation is the reliable
+    source for owner 0 energy and player 1's final observation is the reliable
+    source for owner 1 energy.
+    """
+
     observation = _get(final_state, "observation", {}) or {}
     robots = _get(observation, "robots", {}) or {}
     total = 0
@@ -116,6 +138,8 @@ def _final_own_energy(final_state: Any, owner: int) -> int:
 def run_match(
     params: dict[str, float | int], seed: int, candidate_player: int, config: EvalConfig
 ) -> float:
+    """Run one candidate-vs-baseline game and return candidate energy margin."""
+
     baseline_player = 1 - candidate_player
     agents = [None, None]
     agents[candidate_player] = EngineAgent(params, config.time_budget_ms, seed)
@@ -132,6 +156,8 @@ def run_match(
 
 
 def evaluate_params(params: dict[str, float | int], config: EvalConfig) -> float:
+    """Average margins across seeds and swapped player order."""
+
     margins: list[float] = []
     for offset in range(config.seeds):
         seed = config.base_seed + offset
@@ -141,6 +167,8 @@ def evaluate_params(params: dict[str, float | int], config: EvalConfig) -> float
 
 
 def objective(trial: optuna.trial.Trial, config: EvalConfig) -> float:
+    """Single-process Optuna objective, kept for debugging and notebooks."""
+
     return evaluate_params(suggest_hyperparameters(trial), config)
 
 
@@ -174,6 +202,8 @@ def optimize(args: argparse.Namespace) -> optuna.Study:
     in_flight: dict[concurrent.futures.Future[float], optuna.trial.Trial] = {}
 
     def submit_next(pool: concurrent.futures.ProcessPoolExecutor) -> None:
+        # ask/tell lets the parent keep Optuna storage ownership while workers
+        # run independent C++ engines in separate Python processes.
         nonlocal submitted
         trial = study.ask()
         params = suggest_hyperparameters(trial)
@@ -215,6 +245,8 @@ def optimize(args: argparse.Namespace) -> optuna.Study:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI settings and reject invalid self-play budgets early."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--workers", "--n-jobs", dest="workers", type=int, default=-1)

@@ -26,10 +26,14 @@ _ROOT = Path(__file__).resolve().parent
 
 
 def _jit_log(message):
+    """Emit native-build diagnostics to stderr without polluting action output."""
+
     print(f"[crawler_engine jit] {message}", file=sys.stderr, flush=True)
 
 
 def _pybind11_include_dir():
+    """Locate pybind11 headers from the submission vendor tree or dev install."""
+
     candidates = []
     vendor = _ROOT / "vendor" / "pybind11" / "include"
     candidates.append(vendor)
@@ -47,6 +51,8 @@ def _pybind11_include_dir():
 
 
 def _python_include_dirs():
+    """Return Python include directories for the active Kaggle interpreter."""
+
     paths = sysconfig.get_paths()
     include_dirs = []
     for key in ("include", "platinclude"):
@@ -57,6 +63,8 @@ def _python_include_dirs():
 
 
 def _compile_native_engine():
+    """JIT-compile crawler_engine when Kaggle has no compatible prebuilt module."""
+
     sources = sorted((_ROOT / "src").glob("*.cpp"))
     if not sources:
         _jit_log("no C++ sources found under src/")
@@ -117,6 +125,8 @@ def _compile_native_engine():
 
 
 def _ensure_native_engine():
+    """Import or build the native extension once per Python process."""
+
     global crawler_engine, _JIT_ATTEMPTED
     if crawler_engine is not None:
         return True
@@ -144,16 +154,22 @@ def _ensure_native_engine():
 
 
 def _get(obj, name, default=None):
+    """Read fields from either Kaggle dict observations or SimpleNamespace tests."""
+
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
 
 
 def _cfg(config, name, default):
+    """Read configuration values with a default for local smoke objects."""
+
     return _get(config, name, default)
 
 
 def _fallback_agent(obs, config):
+    """Minimal legal policy used only when native compilation/import fails."""
+
     actions = {}
     width = _cfg(config, "width", 20)
     player = _get(obs, "player", 0)
@@ -196,6 +212,8 @@ def _fallback_agent(obs, config):
 
 
 def agent(obs, config):
+    """Kaggle entrypoint: update one persistent C++ engine and return actions."""
+
     _ensure_native_engine()
     if crawler_engine is None:
         return _fallback_agent(obs, config)

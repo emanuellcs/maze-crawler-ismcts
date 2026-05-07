@@ -10,6 +10,8 @@ OUT = ROOT / "submission.tar.gz"
 
 
 def _pybind11_include_dir() -> Path:
+    """Find installed pybind11 headers to vendor into the source bundle."""
+
     try:
         import pybind11
     except Exception as exc:  # pragma: no cover - packaging requires dev deps.
@@ -24,10 +26,14 @@ def _pybind11_include_dir() -> Path:
 
 
 def _add_file(tar: tarfile.TarFile, path: Path, arcname: Path) -> None:
+    """Add one file with a stable archive name and no recursive surprises."""
+
     tar.add(path, arcname=str(arcname), recursive=False)
 
 
 def build_package() -> Path:
+    """Create submission.tar.gz with main.py, engine sources, and pybind11."""
+
     pybind_include = _pybind11_include_dir()
     with tarfile.open(OUT, "w:gz") as tar:
         _add_file(tar, ROOT / "main.py", Path("main.py"))
