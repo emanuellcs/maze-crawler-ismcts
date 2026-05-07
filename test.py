@@ -8,10 +8,10 @@ import tempfile
 import time
 
 import numpy as np
+import pytest
 
 import crawler_engine
 import package_submission
-
 
 WIDTH = 20
 HEIGHT = 20
@@ -84,8 +84,47 @@ def test_bridge_smoke():
     engine = make_engine({"f0": [0, 5, 2, 1000, 0, 0, 0, 0]})
     actions = engine.choose_actions(10, seed=1)
     assert isinstance(actions, dict)
-    assert actions["f0"] in {"BUILD_WORKER", "BUILD_SCOUT", "NORTH", "JUMP_NORTH", "IDLE"}
+    assert actions["f0"] in {
+        "BUILD_WORKER",
+        "BUILD_SCOUT",
+        "NORTH",
+        "JUMP_NORTH",
+        "IDLE",
+    }
     assert engine.determinize(1)["southBound"] == 0
+
+
+def test_hyperparameters_roundtrip_validation_and_action_generation():
+    engine = make_engine({"f0": [0, 5, 2, 1000, 0, 0, 0, 0]})
+    defaults = engine.get_hyperparameters()
+    assert defaults["C_puct"] == pytest.approx(1.35)
+    assert defaults["baseline_prior_multiplier"] == pytest.approx(1.35)
+    assert defaults["rollout_depth"] == 48
+    assert defaults["FACTORY_BUILD_WORKER"] == pytest.approx(1.25)
+
+    engine.set_hyperparameters(
+        {
+            "C_puct": 2.0,
+            "baseline_prior_multiplier": 1.1,
+            "rollout_depth": 16,
+            "FACTORY_BUILD_WORKER": 0.5,
+        }
+    )
+    updated = engine.get_hyperparameters()
+    assert updated["C_puct"] == pytest.approx(2.0)
+    assert updated["baseline_prior_multiplier"] == pytest.approx(1.1)
+    assert updated["rollout_depth"] == 16
+    assert updated["FACTORY_BUILD_WORKER"] == pytest.approx(0.5)
+
+    with pytest.raises(KeyError):
+        engine.set_hyperparameters({"NOT_A_PARAMETER": 1.0})
+    with pytest.raises(ValueError):
+        engine.set_hyperparameters({"C_puct": 0.0})
+    with pytest.raises(ValueError):
+        engine.set_hyperparameters({"rollout_depth": 0})
+
+    actions = engine.choose_actions(5, seed=7)
+    assert actions["f0"] in VALID_ACTIONS
 
 
 def test_factory_build_spawn_before_combat():
@@ -93,7 +132,9 @@ def test_factory_build_spawn_before_combat():
     engine.step({"f0": "BUILD_WORKER"})
     state = engine.debug_state()
     assert state["robots"] == 2
-    assert any(r["type"] == 2 and r["col"] == 5 and r["row"] == 3 for r in state["robotList"])
+    assert any(
+        r["type"] == 2 and r["col"] == 5 and r["row"] == 3 for r in state["robotList"]
+    )
     worker = next(r for r in state["robotList"] if r["type"] == 2)
     assert worker["move_cd"] == 2
 
@@ -173,7 +214,9 @@ def test_factory_spawn_is_stationary_combat_participant():
     state = engine.debug_state()
     enemy_worker = robot_by_uid(state, "w1")
     assert enemy_worker["row"] == 3
-    assert not any(r["owner"] == 0 and r["type"] == 1 and r["row"] == 3 for r in state["robotList"])
+    assert not any(
+        r["owner"] == 0 and r["type"] == 1 and r["row"] == 3 for r in state["robotList"]
+    )
 
 
 def test_scroll_counter_reconstructed_for_high_step_observation():
@@ -329,6 +372,7 @@ def test_packaged_submission_jit_compiles_in_extracted_directory():
 
 if __name__ == "__main__":
     test_bridge_smoke()
+    test_hyperparameters_roundtrip_validation_and_action_generation()
     test_factory_build_spawn_before_combat()
     test_same_type_annihilation_and_crystal_consumption()
     test_enemy_factories_mutually_annihilate()

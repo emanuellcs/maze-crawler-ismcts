@@ -13,6 +13,7 @@ import traceback
 
 try:
     import crawler_engine
+
     _ENGINE_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - fallback is for submission diagnostics.
     crawler_engine = None
@@ -63,7 +64,9 @@ def _compile_native_engine():
 
     pybind_include = _pybind11_include_dir()
     if pybind_include is None:
-        _jit_log("pybind11 headers not found; expected vendor/pybind11/include or installed pybind11")
+        _jit_log(
+            "pybind11 headers not found; expected vendor/pybind11/include or installed pybind11"
+        )
         return False
 
     python_includes = _python_include_dirs()
@@ -93,7 +96,9 @@ def _compile_native_engine():
     _jit_log("compiling native engine")
     _jit_log("command: " + " ".join(command))
     try:
-        result = subprocess.run(command, cwd=_ROOT, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(
+            command, cwd=_ROOT, capture_output=True, text=True, timeout=180
+        )
     except Exception:
         _jit_log("compiler invocation failed")
         _jit_log(traceback.format_exc())
@@ -182,7 +187,11 @@ def _fallback_agent(obs, config):
                 passable.append("SOUTH")
             if not (w & 8):
                 passable.append("WEST")
-            actions[uid] = "NORTH" if "NORTH" in passable else (choice(passable) if passable else "IDLE")
+            actions[uid] = (
+                "NORTH"
+                if "NORTH" in passable
+                else (choice(passable) if passable else "IDLE")
+            )
     return actions
 
 

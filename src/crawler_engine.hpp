@@ -299,6 +299,19 @@ struct MacroList {
     std::array<MacroAction, MAX_MACROS> macros{};
 };
 
+// Tunable search parameters. Defaults must match the hardcoded engine behavior
+// used before Python-side tuning was introduced.
+struct Hyperparameters {
+    float C_puct = 1.35F;
+    float baseline_prior_multiplier = 1.35F;
+    int rollout_depth = MCTS_ROLLOUT_DEPTH;
+    std::array<float, MAX_MACROS> macro_prior{};
+
+    Hyperparameters();
+    void reset_macro_priors();
+    [[nodiscard]] float prior_for(MacroAction macro) const;
+};
+
 // Fixed-arena ISMCTS tree node. Edges store one bounded joint macro plan keyed
 // by robot UID so children remain meaningful across sampled determinizations.
 struct MCTSNode {
@@ -370,6 +383,7 @@ public:
     BeliefState belief{};
     CrawlerSim sim{};
     MCTSArena mcts{};
+    Hyperparameters hyperparameters{};
 
     Engine();
     explicit Engine(int player);

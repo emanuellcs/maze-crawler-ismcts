@@ -13,7 +13,6 @@
 namespace crawler {
 namespace {
 
-constexpr float PUCT_C = 1.35F;
 constexpr uint64_t ITERATION_SEED = 0x9e3779b97f4a7c15ULL;
 
 struct PlanCandidate {
@@ -103,33 +102,13 @@ MacroAction default_macro_for_robot(const BoardState& state, int robot_index, in
     return MACRO_IDLE;
 }
 
-float macro_prior(MacroAction macro) {
-    switch (macro) {
-        case MACRO_FACTORY_BUILD_WORKER: return 1.25F;
-        case MACRO_FACTORY_BUILD_SCOUT: return 1.10F;
-        case MACRO_FACTORY_BUILD_MINER: return 0.85F;
-        case MACRO_FACTORY_SAFE_ADVANCE: return 1.00F;
-        case MACRO_FACTORY_JUMP_OBSTACLE: return 0.90F;
-        case MACRO_WORKER_OPEN_NORTH_WALL: return 1.00F;
-        case MACRO_WORKER_ADVANCE: return 0.95F;
-        case MACRO_WORKER_ESCORT_FACTORY: return 0.70F;
-        case MACRO_SCOUT_HUNT_CRYSTAL: return 1.00F;
-        case MACRO_SCOUT_EXPLORE_NORTH: return 0.85F;
-        case MACRO_SCOUT_RETURN_ENERGY: return 0.75F;
-        case MACRO_MINER_SEEK_NODE: return 0.95F;
-        case MACRO_MINER_TRANSFORM: return 1.15F;
-        case MACRO_IDLE:
-        default: return 0.20F;
-    }
-}
-
-float candidate_prior(const PlanCandidate& candidate) {
+float candidate_prior(const Hyperparameters& hyperparameters, const PlanCandidate& candidate) {
     if (candidate.plan_count <= 0) {
         return 0.10F;
     }
     float sum = 0.0F;
     for (int i = 0; i < candidate.plan_count; ++i) {
-        sum += macro_prior(candidate.macro[static_cast<size_t>(i)]);
+        sum += hyperparameters.prior_for(candidate.macro[static_cast<size_t>(i)]);
     }
     return std::max(0.05F, sum / static_cast<float>(candidate.plan_count));
 }
@@ -146,7 +125,7 @@ int collect_controlled_robots(const BoardState& state, int owner,
     return count;
 }
 
-int generate_candidates(const CrawlerSim& sim, int root_player,
+int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparameters& hyperparameters,
                         std::array<PlanCandidate, MAX_MCTS_CANDIDATES>& candidates) {
     std::array<int, MAX_MCTS_PLAN_ROBOTS> controlled{};
     const int controlled_count = collect_controlled_robots(sim.state, root_player, controlled);
@@ -162,7 +141,7 @@ int generate_candidates(const CrawlerSim& sim, int root_player,
                          sim.state.robots.uid[static_cast<size_t>(robot_index)].data());
         baseline.macro[static_cast<size_t>(i)] = default_macro_for_robot(sim.state, robot_index, root_player);
     }
-    baseline.prior = candidate_prior(baseline) * 1.35F;
+    baseline.prior = candidate_prior(hyperparameters, baseline) * hyperparameters.baseline_prior_multiplier;
 
     int count = 0;
     candidates[static_cast<size_t>(count++)] = baseline;
@@ -177,7 +156,7 @@ int generate_candidates(const CrawlerSim& sim, int root_player,
             }
             PlanCandidate candidate = baseline;
             candidate.macro[static_cast<size_t>(robot_ordinal)] = macro;
-            candidate.prior = candidate_prior(candidate);
+            candidate.prior = candidate_prior(hyperparameters, candidate);
             candidates[static_cast<size_t>(count++)] = candidate;
         }
     }
@@ -193,7 +172,8 @@ void copy_candidate_to_node(const PlanCandidate& candidate, MCTSNode& node) {
     }
 }
 
-void expand_node(MCTSArena& arena, int node_index, const CrawlerSim& sim, int root_player) {
+void expand_node(MCTSArena& arena, int node_index, const CrawlerSim& sim, int root_player,
+                 const Hyperparameters& hyperparameters) {
     MCTSNode& parent = arena.nodes[static_cast<size_t>(node_index)];
     if (parent.expanded != 0) {
         return;
@@ -204,7 +184,7 @@ void expand_node(MCTSArena& arena, int node_index, const CrawlerSim& sim, int ro
     }
 
     std::array<PlanCandidate, MAX_MCTS_CANDIDATES> candidates;
-    const int candidate_count = generate_candidates(sim, root_player, candidates);
+    const int candidate_count = generate_candidates(sim, root_player, hyperparameters, candidates);
     if (candidate_count <= 0) {
         return;
     }
@@ -230,7 +210,7 @@ void expand_node(MCTSArena& arena, int node_index, const CrawlerSim& sim, int ro
     }
 }
 
-int select_child(const MCTSArena& arena, int node_index) {
+int select_child(const MCTSArena& arena, int node_index, const Hyperparameters& hyperparameters) {
     const MCTSNode& parent = arena.nodes[static_cast<size_t>(node_index)];
     const float parent_sqrt = std::sqrt(static_cast<float>(parent.visits + 1));
     int best = -1;
@@ -240,7 +220,7 @@ int select_child(const MCTSArena& arena, int node_index) {
          child = arena.nodes[static_cast<size_t>(child)].next_sibling) {
         const MCTSNode& node = arena.nodes[static_cast<size_t>(child)];
         const float q = node.visits > 0 ? node.value_sum / static_cast<float>(node.visits) : 0.0F;
-        const float u = PUCT_C * node.prior * parent_sqrt / static_cast<float>(node.visits + 1);
+        const float u = hyperparameters.C_puct * node.prior * parent_sqrt / static_cast<float>(node.visits + 1);
         const float score = q + u;
         if (score > best_score) {
             best_score = score;
@@ -358,9 +338,9 @@ float evaluate_state(const BoardState& state, int root_player) {
                       -1.0F, 1.0F);
 }
 
-float rollout(CrawlerSim& sim, int root_player) {
+float rollout(CrawlerSim& sim, int root_player, int rollout_depth) {
     PrimitiveActions actions{};
-    for (int depth = 0; depth < MCTS_ROLLOUT_DEPTH && !sim.state.done; ++depth) {
+    for (int depth = 0; depth < rollout_depth && !sim.state.done; ++depth) {
         fill_heuristic_actions(sim, actions);
         sim.step(actions);
     }
@@ -494,13 +474,13 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
                 break;
             }
             if (current.expanded == 0) {
-                expand_node(mcts, node, search_sim, sim.state.player);
+                expand_node(mcts, node, search_sim, sim.state.player, hyperparameters);
             }
             if (current.child_count <= 0) {
                 break;
             }
 
-            const int child = select_child(mcts, node);
+            const int child = select_child(mcts, node, hyperparameters);
             if (child < 0) {
                 break;
             }
@@ -514,7 +494,7 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
             }
         }
 
-        const float value = rollout(search_sim, sim.state.player);
+        const float value = rollout(search_sim, sim.state.player, hyperparameters.rollout_depth);
         backpropagate(mcts, path, path_count, value);
         ++iterations;
     }

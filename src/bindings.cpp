@@ -7,12 +7,88 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cmath>
 #include <string>
 
 namespace py = pybind11;
 
 namespace {
+
+constexpr std::array<crawler::MacroAction, 14> HYPERPARAMETER_MACROS{
+    crawler::MACRO_IDLE,
+    crawler::MACRO_FACTORY_SAFE_ADVANCE,
+    crawler::MACRO_FACTORY_BUILD_WORKER,
+    crawler::MACRO_FACTORY_BUILD_SCOUT,
+    crawler::MACRO_FACTORY_BUILD_MINER,
+    crawler::MACRO_FACTORY_JUMP_OBSTACLE,
+    crawler::MACRO_WORKER_OPEN_NORTH_WALL,
+    crawler::MACRO_WORKER_ESCORT_FACTORY,
+    crawler::MACRO_WORKER_ADVANCE,
+    crawler::MACRO_SCOUT_HUNT_CRYSTAL,
+    crawler::MACRO_SCOUT_EXPLORE_NORTH,
+    crawler::MACRO_SCOUT_RETURN_ENERGY,
+    crawler::MACRO_MINER_SEEK_NODE,
+    crawler::MACRO_MINER_TRANSFORM,
+};
+
+void require_positive_finite(const std::string& key, double value) {
+    if (!std::isfinite(value) || value <= 0.0) {
+        throw py::value_error(key + " must be a positive finite number");
+    }
+}
+
+bool set_macro_prior(crawler::Hyperparameters& hyperparameters, const std::string& key, double value) {
+    for (const crawler::MacroAction macro : HYPERPARAMETER_MACROS) {
+        if (key == crawler::macro_action_name(macro)) {
+            require_positive_finite(key, value);
+            hyperparameters.macro_prior[static_cast<size_t>(macro)] = static_cast<float>(value);
+            return true;
+        }
+    }
+    return false;
+}
+
+void apply_hyperparameter(crawler::Hyperparameters& hyperparameters, const std::string& key,
+                          const py::handle& value) {
+    if (key == "rollout_depth") {
+        const int depth = py::cast<int>(value);
+        if (depth <= 0 || depth > 512) {
+            throw py::value_error("rollout_depth must be an integer in [1, 512]");
+        }
+        hyperparameters.rollout_depth = depth;
+        return;
+    }
+
+    const double numeric_value = py::cast<double>(value);
+    if (key == "C_puct") {
+        require_positive_finite(key, numeric_value);
+        hyperparameters.C_puct = static_cast<float>(numeric_value);
+        return;
+    }
+    if (key == "baseline_prior_multiplier") {
+        require_positive_finite(key, numeric_value);
+        hyperparameters.baseline_prior_multiplier = static_cast<float>(numeric_value);
+        return;
+    }
+    if (set_macro_prior(hyperparameters, key, numeric_value)) {
+        return;
+    }
+
+    throw py::key_error("unknown hyperparameter: " + key);
+}
+
+py::dict hyperparameters_to_dict(const crawler::Hyperparameters& hyperparameters) {
+    py::dict out;
+    out["C_puct"] = hyperparameters.C_puct;
+    out["baseline_prior_multiplier"] = hyperparameters.baseline_prior_multiplier;
+    out["rollout_depth"] = hyperparameters.rollout_depth;
+    for (const crawler::MacroAction macro : HYPERPARAMETER_MACROS) {
+        out[py::str(crawler::macro_action_name(macro))] = hyperparameters.prior_for(macro);
+    }
+    return out;
+}
 
 // Python observations key sparse cells as "col,row"; this helper decodes that
 // form without allocating temporary structured objects in C++.
@@ -206,6 +282,16 @@ public:
         return action_result_to_dict(engine.choose_actions(time_budget_ms, seed));
     }
 
+    void set_hyperparameters(const py::dict& params) {
+        for (auto item : params) {
+            apply_hyperparameter(engine.hyperparameters, py::cast<std::string>(py::str(item.first)), item.second);
+        }
+    }
+
+    py::dict get_hyperparameters() const {
+        return hyperparameters_to_dict(engine.hyperparameters);
+    }
+
     void step(const py::dict& actions) {
         crawler::PrimitiveActions primitive{};
         primitive.clear();
@@ -250,6 +336,8 @@ PYBIND11_MODULE(crawler_engine, m) {
              py::arg("northBound"), py::arg("step") = -1)
         .def("choose_actions", &PyEngine::choose_actions, py::arg("time_budget_ms") = 2000,
              py::arg("seed") = 0)
+        .def("set_hyperparameters", &PyEngine::set_hyperparameters, py::arg("params"))
+        .def("get_hyperparameters", &PyEngine::get_hyperparameters)
         .def("step", &PyEngine::step, py::arg("actions"))
         .def("determinize", &PyEngine::determinize, py::arg("seed") = 0)
         .def("debug_mcts_value", &PyEngine::debug_mcts_value, py::arg("player") = -1)
