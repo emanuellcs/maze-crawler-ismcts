@@ -12,6 +12,8 @@ namespace crawler {
 namespace {
 
 void compute_rewards(BoardState& state) {
+    // Mid-game rewards mirror the environment's energy signal. Terminal states
+    // switch to the rulebook tiebreaker cascade: factory survival, energy, units.
     int factory_count[2] = {0, 0};
     int64_t energy[2] = {0, 0};
     int units[2] = {0, 0};
@@ -78,6 +80,8 @@ void compute_rewards(BoardState& state) {
 }
 
 int energy_space_for_robot(const BoardState& state, int robot_index) {
+    // Factories have no game cap, but storage still uses int32_t. Non-factory
+    // robots use their rule-defined max energy.
     const int energy = state.robots.energy[static_cast<size_t>(robot_index)];
     if (state.robots.type[static_cast<size_t>(robot_index)] == FACTORY) {
         return std::max(0, std::numeric_limits<int32_t>::max() - energy);
@@ -92,6 +96,8 @@ void CrawlerSim::reset() {
 }
 
 void CrawlerSim::load_from_observation(const ObservationInput& obs, const BeliefState& belief) {
+    // Rebuild the concrete snapshot from public observation plus remembered
+    // belief facts. Generated UID serials are preserved across observations.
     const int prior_step = state.step;
     const uint32_t prior_uid = state.next_generated_uid;
     state.reset();

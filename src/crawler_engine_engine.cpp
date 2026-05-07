@@ -5,6 +5,38 @@
 
 namespace crawler {
 
+Hyperparameters::Hyperparameters() {
+    reset_macro_priors();
+}
+
+void Hyperparameters::reset_macro_priors() {
+    // Defaults reproduce the original anonymous-namespace constants from the
+    // MCTS implementation. Keep this table synchronized with README tuning docs.
+    macro_prior.fill(0.20F);
+    macro_prior[static_cast<size_t>(MACRO_IDLE)] = 0.20F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_SAFE_ADVANCE)] = 1.00F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_WORKER)] = 1.25F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_SCOUT)] = 1.10F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_MINER)] = 0.85F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_JUMP_OBSTACLE)] = 0.90F;
+    macro_prior[static_cast<size_t>(MACRO_WORKER_OPEN_NORTH_WALL)] = 1.00F;
+    macro_prior[static_cast<size_t>(MACRO_WORKER_ESCORT_FACTORY)] = 0.70F;
+    macro_prior[static_cast<size_t>(MACRO_WORKER_ADVANCE)] = 0.95F;
+    macro_prior[static_cast<size_t>(MACRO_SCOUT_HUNT_CRYSTAL)] = 1.00F;
+    macro_prior[static_cast<size_t>(MACRO_SCOUT_EXPLORE_NORTH)] = 0.85F;
+    macro_prior[static_cast<size_t>(MACRO_SCOUT_RETURN_ENERGY)] = 0.75F;
+    macro_prior[static_cast<size_t>(MACRO_MINER_SEEK_NODE)] = 0.95F;
+    macro_prior[static_cast<size_t>(MACRO_MINER_TRANSFORM)] = 1.15F;
+}
+
+float Hyperparameters::prior_for(MacroAction macro) const {
+    const size_t index = static_cast<size_t>(macro);
+    if (index >= macro_prior.size()) {
+        return 0.20F;
+    }
+    return macro_prior[index];
+}
+
 // Construct an empty engine. The player-specific constructor sets ownership after
 // both fixed-buffer stores have been reset.
 Engine::Engine() {

@@ -14,6 +14,8 @@ Completed:
 - Fixed-arena ISMCTS implementation with PUCT selection.
 - Bounded macro-action expansion over joint plans instead of primitive action Cartesian products.
 - Continuous rollout evaluation with terminal tiebreaker energy-margin shaping.
+- Runtime hyperparameter injection from Python for PUCT, rollout depth, and macro priors.
+- Process-parallel Optuna tuner for candidate-versus-`opponent.py` evaluation.
 - `int32_t` robot energy storage and factory capacity handling.
 - Spawn-combat, transfer, fixed-wall, jump/offboard, cooldown, mine, crystal, reward, and scrolling rule edge cases covered by tests.
 - Kaggle source-bundle packaging with vendored `pybind11` headers.
@@ -21,7 +23,7 @@ Completed:
 
 Remaining work is empirical rather than structural:
 
-- Tune `C_puct`, macro priors, rollout depth, and dynamic per-turn time budgets.
+- Run large production Optuna studies over `C_puct`, macro priors, rollout depth, and time budgets.
 - Improve rollout policy quality with self-play data and targeted heuristics.
 - Run large-scale self-play and ablation studies across seed suites.
 - Calibrate opening, mining, scout return, and factory advance policy weights.
@@ -34,8 +36,10 @@ Remaining work is empirical rather than structural:
 ├── main.py                     # Kaggle agent entrypoint with JIT native build
 ├── package_submission.py       # Builds source bundle with vendored pybind11
 ├── submission.py               # Local alias for main.agent
+├── opponent.py                 # Strong Python benchmark agent used by tune.py
 ├── requirements-dev.txt        # Build/test dependencies
 ├── test.py                     # Rule, MCTS, bridge, and package smoke tests
+├── tune.py                     # Optuna opponent-backed hyperparameter tuner
 ├── rules/                      # Competition rule reference and notes
 └── src/
     ├── bindings.cpp            # pybind11 observation/action bridge
@@ -62,7 +66,7 @@ The engine is split by ownership boundary:
 - `crawler_engine_policy.cpp` owns the deterministic fallback policy, opponent/rollout heuristics, macro generation, and macro-to-primitive translation.
 - `crawler_engine_mcts.cpp` owns the fixed-arena ISMCTS loop, PUCT selection, rollout evaluation, and root action extraction.
 - `crawler_engine_engine.cpp` wires observation updates, belief, current concrete state, and search together.
-- `bindings.cpp` translates Kaggle-style Python dictionaries into fixed C++ buffers and returns Kaggle-compatible `{uid: "ACTION"}` dictionaries.
+- `bindings.cpp` translates Kaggle-style Python dictionaries into fixed C++ buffers, exposes hyperparameter injection, and returns Kaggle-compatible `{uid: "ACTION"}` dictionaries.
 
 ## Fixed-Buffer State Model
 
@@ -160,6 +164,8 @@ C_puct = 1.35
 
 Root action choice is visit-count first, value second. This keeps the final move robust under short Kaggle budgets while still using rollout value to break ties.
 
+`C_puct` is a runtime hyperparameter. Python can override it per `Engine` instance without affecting other engines in the same process.
+
 ### Expansion
 
 The search does not branch over every primitive action for every robot. It branches over bounded macro plans.
@@ -202,6 +208,8 @@ IDLE = 0.20
 
 Child priors are normalized across generated candidates.
 
+The baseline joint plan receives an additional `baseline_prior_multiplier` before normalization. This gives Optuna a way to tune how strongly the engine trusts its deterministic default plan relative to one-robot deviations.
+
 ### Simulation and Rollout
 
 When a selected node is applied:
@@ -210,7 +218,7 @@ When a selected node is applied:
 - Planned root-player macro entries are translated into primitive actions with `primitive_for_macro`.
 - The deterministic simulator executes one full turn.
 
-Rollouts continue for up to `MCTS_ROLLOUT_DEPTH = 48` turns or until terminal state. They use the same deterministic heuristic policy for both owners. This keeps rollout evaluation cheap, reproducible, and rule-compliant.
+Rollouts continue for up to `MCTS_ROLLOUT_DEPTH = 48` turns by default or until terminal state. They use the same deterministic heuristic policy for both owners. This keeps rollout evaluation cheap, reproducible, and rule-compliant. The effective rollout cap is exposed as the `rollout_depth` hyperparameter.
 
 ### Value Function
 
@@ -370,6 +378,22 @@ Returned actions are Kaggle-compatible:
 {"f0": "BUILD_WORKER", "s0": "NORTH"}
 ```
 
+Search hyperparameters are per engine instance:
+
+```python
+engine.set_hyperparameters({
+    "C_puct": 2.0,
+    "baseline_prior_multiplier": 1.1,
+    "rollout_depth": 32,
+    "FACTORY_BUILD_WORKER": 1.5,
+    "SCOUT_RETURN_ENERGY": 0.9,
+})
+
+params = engine.get_hyperparameters()
+```
+
+`set_hyperparameters` accepts partial dictionaries and rejects unknown keys. Numeric values must be positive and finite; `rollout_depth` must be a positive integer. Macro prior keys use the readable macro names returned by `crawler_engine.macro_action_name`, without the internal `MACRO_` prefix.
+
 Debug/test helpers:
 
 - `engine.step(actions)` applies primitive actions to the current simulator snapshot.
@@ -379,6 +403,105 @@ Debug/test helpers:
 - `crawler_engine.action_name(int_action)` returns a primitive action string.
 - `crawler_engine.macro_action_name(int_macro)` returns a macro action string.
 
+## Hyperparameter Tuning
+
+`tune.py` runs Bayesian optimization with Optuna against the strong root-level `opponent.py` benchmark. Each trial:
+
+1. Samples `C_puct`, `baseline_prior_multiplier`, `rollout_depth`, and macro priors.
+2. Builds fresh Kaggle-compatible candidate wrappers around `crawler_engine.Engine`.
+3. Injects the sampled parameters with `engine.set_hyperparameters(params)`.
+4. Runs the candidate against `opponent.py` on each configured seed.
+5. Swaps player order for every seed.
+6. Returns the average final energy margin from the candidate perspective.
+
+The score is:
+
+```text
+candidate_total_energy - opponent_total_energy
+```
+
+Final energy is read from each owner player's final observation because enemy robots can be hidden by fog of war. A positive score means the candidate ended ahead of `opponent.py` on average.
+
+The tuner uses `ProcessPoolExecutor` with Optuna `ask`/`tell` instead of thread parallelism. Each worker process creates its own Python agents and C++ `Engine` instances, so mutable search state and pybind objects are not shared between workers.
+
+### Tuning Host Profile
+
+The default tuning settings target this local workstation:
+
+```text
+CPU: Intel Core i7-12700
+Core layout: 12 total cores = 8 Performance-cores + 4 Efficient-cores
+Threads: 20 total with Intel Hyper-Threading
+Max turbo: 4.90 GHz
+Intel Turbo Boost Max Technology 3.0 frequency: 4.90 GHz
+Performance-core max/base: 4.80 GHz / 2.10 GHz
+Efficient-core max/base: 3.60 GHz / 1.60 GHz
+Cache: 25 MB Intel Smart Cache
+Total L2 cache: 12 MB
+Memory: 16 GB DDR4
+Instruction set: 64-bit
+Instruction extensions: SSE4.1, SSE4.2, AVX2
+Scheduling/power features: Intel Thread Director, Speed Shift, Enhanced SpeedStep, idle states
+Other CPU features: Intel DL Boost, Gaussian & Neural Accelerator 3.0, Optane Memory support
+```
+
+The default `--n-jobs 16` is intentionally below the 20 hardware threads. It keeps the 8 P-cores and most logical threads busy while leaving headroom for the OS, SQLite writes, Python/Kaggle environment overhead, and the 16 GB RAM limit. If the machine starts swapping or SQLite latency rises, reduce to `--n-jobs 12`; if CPU utilization is low and memory is stable, test `--n-jobs 18`.
+
+The study persists to SQLite by default:
+
+```text
+sqlite:///tune.db
+```
+
+That makes long runs pause/resume safe: rerun the same command with the same `--storage` and `--study-name`.
+
+If the native extension cannot be imported, `tune.py` tries the same JIT path used by `main.py`. A trial-level import, compile, or agent error is logged and marked failed instead of terminating the whole study.
+
+Smoke run:
+
+```bash
+PYTHONPATH=build /tmp/maze-crawler-venv/bin/python tune.py \
+  --trials 1 \
+  --n-jobs 1 \
+  --seeds 1 \
+  --time-budget 10 \
+  --storage sqlite:////tmp/maze-crawler-opponent-smoke.db \
+  --study-name opponent-smoke
+```
+
+Production-style run:
+
+```bash
+PYTHONPATH=build /tmp/maze-crawler-venv/bin/python tune.py \
+  --trials 1000 \
+  --n-jobs 16 \
+  --seeds 5 \
+  --time-budget 300 \
+  --storage sqlite:///tune.db \
+  --study-name crawl-vs-opponent
+```
+
+Important CLI defaults:
+
+```text
+--trials 100
+--seeds 3
+--time-budget 300
+--n-jobs 16
+--storage sqlite:///tune.db
+--study-name crawl-vs-opponent
+```
+
+Default search ranges:
+
+```text
+C_puct: 0.5 to 3.0
+baseline_prior_multiplier: 0.75 to 2.0
+rollout_depth: 16 to 96, step 8
+IDLE prior: 0.05 to 0.75
+all other macro priors: 0.25 to 2.5
+```
+
 ## Local Build
 
 Requirements:
@@ -386,7 +509,7 @@ Requirements:
 - CMake 3.20 or newer.
 - C++20 compiler.
 - Python 3 with development headers.
-- `pybind11`, `numpy`, `pytest`, and `kaggle-environments` from `requirements-dev.txt`.
+- `pybind11`, `numpy`, `pytest`, `kaggle-environments`, and `optuna` from `requirements-dev.txt`.
 
 Create a development environment:
 
@@ -438,6 +561,7 @@ Current coverage includes:
 - Fixed center-wall edit no-op with energy cost.
 - Off-board jump destruction.
 - MCTS small-time-budget behavior and action validity.
+- Hyperparameter API defaults, partial updates, validation errors, and action generation after injection.
 - Packaged submission JIT compilation in an extracted clean directory.
 
 ## Kaggle Submission Bundle
@@ -527,10 +651,10 @@ The remaining roadmap is data science and empirical optimization:
 
 - Hyperparameter tuning:
   - `C_puct`
-  - tree depth
   - rollout depth
-  - candidate cap
   - macro prior weights
+  - baseline prior multiplier
+  - dynamic time budgets
 - Dynamic time control:
   - opening versus mid-game budgets
   - unit-count-aware iteration budgets
@@ -543,11 +667,13 @@ The remaining roadmap is data science and empirical optimization:
 - Evaluation:
   - deterministic seed suites
   - large-scale self-play
+  - candidate-versus-`opponent.py` production studies
   - macro-prior ablations
   - rollout-depth ablations
+  - best-parameter confidence intervals
   - opponent-policy robustness tests
 
-Core engine implementation, rule fidelity, fixed-arena search, and Kaggle JIT deployment are complete.
+Core engine implementation, rule fidelity, fixed-arena search, Kaggle JIT deployment, and the opponent-backed Optuna tuning loop are complete.
 
 ## License
 

@@ -16,10 +16,12 @@ bool chance(uint64_t& state, int numerator, int denominator) {
     return static_cast<int>(next_u32(state) % static_cast<uint32_t>(denominator)) < numerator;
 }
 
+// Convert a one-sided wall edit into the neighbor cell's opposite bit.
 uint8_t reciprocal_wall(Direction direction) {
     return direction_wall_bit(opposite_direction(direction));
 }
 
+// Kaggle's Python reference uses banker-style round for scroll interval ramping.
 int py_round_interval(double value) {
     return static_cast<int>(std::nearbyint(value));
 }
@@ -81,6 +83,8 @@ int scroll_interval(int step) {
 }
 
 int scroll_counter_at_step(int step) {
+    // Reconstruct the hidden scroll countdown from the public step number so
+    // freshly loaded observations advance on the same cadence as the real env.
     int counter = SCROLL_START_INTERVAL;
     const int clamped_step = std::max(0, std::min(step, EPISODE_STEPS));
     for (int s = 0; s < clamped_step; ++s) {
@@ -121,6 +125,8 @@ void set_or_clear_wall(BoardState& state, int c, int r, Direction direction, boo
 }
 
 void generate_optimistic_row(BoardState& state, int row, uint64_t seed) {
+    // Determinization needs plausible future rows before they are observed.
+    // The generator preserves east/west symmetry and rough resource densities.
     if (row < 0 || row >= MAX_ROWS) {
         return;
     }
