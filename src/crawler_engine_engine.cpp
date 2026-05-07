@@ -14,6 +14,7 @@ void Hyperparameters::reset_macro_priors() {
     // MCTS implementation. Keep this table synchronized with README tuning docs.
     macro_prior.fill(0.20F);
     macro_prior[static_cast<size_t>(MACRO_IDLE)] = 0.20F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_SUPPORT_WORKER)] = 1.40F;
     macro_prior[static_cast<size_t>(MACRO_FACTORY_SAFE_ADVANCE)] = 1.00F;
     macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_WORKER)] = 1.25F;
     macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_SCOUT)] = 1.10F;

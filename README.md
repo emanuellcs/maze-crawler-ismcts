@@ -172,7 +172,7 @@ The search does not branch over every primitive action for every robot. It branc
 
 For the controlled side, candidate generation builds:
 
-- A baseline joint plan using the deterministic default macro for every controlled robot.
+- A baseline joint plan using the deterministic opponent-style policy for every controlled robot.
 - One-robot deviations from that baseline, drawn from each robot's bounded `MacroList`.
 
 This keeps branching capped by `MAX_MCTS_CANDIDATES = 64`, even when many units are alive. The controlled robot list is capped at `MAX_MCTS_PLAN_ROBOTS = 64`.
@@ -180,6 +180,7 @@ This keeps branching capped by `MAX_MCTS_CANDIDATES = 64`, even when many units 
 Supported macro intents include:
 
 - `FACTORY_SAFE_ADVANCE`
+- `FACTORY_SUPPORT_WORKER`
 - `FACTORY_BUILD_WORKER`
 - `FACTORY_BUILD_SCOUT`
 - `FACTORY_BUILD_MINER`
@@ -197,6 +198,7 @@ Supported macro intents include:
 Macro priors encode the current tactical bias. Examples:
 
 ```text
+FACTORY_SUPPORT_WORKER = 1.40
 FACTORY_BUILD_WORKER = 1.25
 MINER_TRANSFORM = 1.15
 FACTORY_BUILD_SCOUT = 1.10
