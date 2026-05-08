@@ -61,7 +61,16 @@ def open_walls():
     return walls
 
 
-def make_engine(robots, walls=None, crystals=None, mines=None, nodes=None, step=0):
+def make_engine(
+    robots,
+    walls=None,
+    crystals=None,
+    mines=None,
+    nodes=None,
+    step=0,
+    south_bound=0,
+    north_bound=19,
+):
     """Create an engine from a compact Kaggle-style observation fixture."""
 
     engine = crawler_engine.Engine(0)
@@ -72,8 +81,8 @@ def make_engine(robots, walls=None, crystals=None, mines=None, nodes=None, step=
         robots,
         mines or {},
         nodes or {},
-        0,
-        19,
+        south_bound,
+        north_bound,
         step,
     )
     return engine
@@ -108,6 +117,7 @@ def test_hyperparameters_roundtrip_validation_and_action_generation():
     assert defaults["C_puct"] == pytest.approx(1.35)
     assert defaults["baseline_prior_multiplier"] == pytest.approx(1.35)
     assert defaults["rollout_depth"] == 48
+    assert defaults["FACTORY_SUPPORT_WORKER"] == pytest.approx(1.40)
     assert defaults["FACTORY_BUILD_WORKER"] == pytest.approx(1.25)
 
     engine.set_hyperparameters(
@@ -133,6 +143,90 @@ def test_hyperparameters_roundtrip_validation_and_action_generation():
 
     actions = engine.choose_actions(5, seed=7)
     assert actions["f0"] in VALID_ACTIONS
+
+
+def test_opponent_policy_factory_supports_adjacent_worker():
+    engine = make_engine(
+        {
+            "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
+            "w0": [2, 5, 3, 50, 0, 0, 0, 0],
+        }
+    )
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["f0"] == "TRANSFER_NORTH"
+
+
+def test_opponent_policy_factory_emergency_jumps_north():
+    engine = make_engine(
+        {"f0": [0, 5, 6, 1000, 0, 0, 0, 0]},
+        south_bound=5,
+        north_bound=24,
+    )
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["f0"] == "JUMP_NORTH"
+
+
+def test_opponent_policy_worker_removes_blocking_north_wall():
+    walls = open_walls()
+    walls[2 * WIDTH + 5] |= WALL_N
+    engine = make_engine({"w0": [2, 5, 2, 150, 0, 0, 0, 0]}, walls=walls)
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["w0"] == "REMOVE_NORTH"
+
+
+def test_opponent_policy_scout_transfers_to_adjacent_factory():
+    engine = make_engine(
+        {
+            "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
+            "s0": [1, 5, 3, 50, 0, 0, 0, 0],
+        }
+    )
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["s0"] == "TRANSFER_SOUTH"
+
+
+def test_opponent_policy_scout_returns_when_loaded():
+    engine = make_engine(
+        {
+            "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
+            "s0": [1, 6, 3, 90, 0, 0, 0, 0],
+        }
+    )
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["s0"] == "SOUTH"
+
+
+def test_opponent_policy_scout_hunts_visible_crystal():
+    engine = make_engine(
+        {"s0": [1, 5, 2, 20, 0, 0, 0, 0]},
+        crystals={"5,4": 25},
+    )
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["s0"] == "NORTH"
+
+
+def test_opponent_policy_scout_explores_north_without_crystals():
+    engine = make_engine({"s0": [1, 5, 2, 20, 0, 0, 0, 0]})
+
+    actions = engine.choose_actions(0, seed=1)
+    assert actions["s0"] == "NORTH"
+
+
+def test_policy_source_avoids_dynamic_allocation_primitives():
+    with open(
+        os.path.join(os.path.dirname(__file__), "src", "crawler_engine_policy.cpp"),
+        encoding="utf-8",
+    ) as policy_file:
+        policy_source = policy_file.read()
+
+    for forbidden in ("std::vector", "std::deque", "std::set", "new"):
+        assert forbidden not in policy_source
 
 
 def test_factory_build_spawn_before_combat():

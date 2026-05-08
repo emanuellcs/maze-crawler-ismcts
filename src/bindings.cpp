@@ -16,8 +16,9 @@ namespace py = pybind11;
 
 namespace {
 
-constexpr std::array<crawler::MacroAction, 14> HYPERPARAMETER_MACROS{
+constexpr std::array<crawler::MacroAction, 15> HYPERPARAMETER_MACROS{
     crawler::MACRO_IDLE,
+    crawler::MACRO_FACTORY_SUPPORT_WORKER,
     crawler::MACRO_FACTORY_SAFE_ADVANCE,
     crawler::MACRO_FACTORY_BUILD_WORKER,
     crawler::MACRO_FACTORY_BUILD_SCOUT,

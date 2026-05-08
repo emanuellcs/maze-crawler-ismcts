@@ -32,78 +32,6 @@ struct EvalStats {
     std::array<int, 2> best_factory_row{0, 0};
 };
 
-bool can_pay_after_drain_local(int energy, int cost) {
-    return energy >= cost + ENERGY_PER_TURN;
-}
-
-bool ready_after_tick_local(int cooldown) {
-    return cooldown <= 1;
-}
-
-int count_owner_type(const BoardState& state, int owner, RobotType type) {
-    int count = 0;
-    for (int i = 0; i < state.robots.used; ++i) {
-        if (state.robots.alive[static_cast<size_t>(i)] != 0 &&
-            state.robots.owner[static_cast<size_t>(i)] == owner &&
-            state.robots.type[static_cast<size_t>(i)] == type) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-MacroAction default_macro_for_robot(const BoardState& state, int robot_index, int owner) {
-    const uint8_t type = state.robots.type[static_cast<size_t>(robot_index)];
-    const int c = state.robots.col[static_cast<size_t>(robot_index)];
-    const int r = state.robots.row[static_cast<size_t>(robot_index)];
-    const int e = state.robots.energy[static_cast<size_t>(robot_index)];
-    const uint8_t wall = state.wall_at(c, r);
-
-    if (type == FACTORY) {
-        if ((wall & WALL_N) != 0 &&
-            ready_after_tick_local(state.robots.jump_cd[static_cast<size_t>(robot_index)]) &&
-            ready_after_tick_local(state.robots.move_cd[static_cast<size_t>(robot_index)]) &&
-            r + 2 <= state.north_bound) {
-            return MACRO_FACTORY_JUMP_OBSTACLE;
-        }
-        if (ready_after_tick_local(state.robots.build_cd[static_cast<size_t>(robot_index)]) &&
-            r + 1 <= state.north_bound && state.can_move_through(c, r, DIR_NORTH)) {
-            if (count_owner_type(state, owner, WORKER) < 2 && can_pay_after_drain_local(e, WORKER_COST)) {
-                return MACRO_FACTORY_BUILD_WORKER;
-            }
-            if (count_owner_type(state, owner, SCOUT) < 3 && can_pay_after_drain_local(e, SCOUT_COST)) {
-                return MACRO_FACTORY_BUILD_SCOUT;
-            }
-            if (can_pay_after_drain_local(e, MINER_COST)) {
-                return MACRO_FACTORY_BUILD_MINER;
-            }
-        }
-        return MACRO_FACTORY_SAFE_ADVANCE;
-    }
-
-    if (type == WORKER) {
-        if ((wall & WALL_N) != 0 && can_pay_after_drain_local(e, WALL_REMOVE_COST)) {
-            return MACRO_WORKER_OPEN_NORTH_WALL;
-        }
-        return MACRO_WORKER_ADVANCE;
-    }
-
-    if (type == SCOUT) {
-        return e >= (SCOUT_MAX_ENERGY * 4) / 5 ? MACRO_SCOUT_RETURN_ENERGY : MACRO_SCOUT_HUNT_CRYSTAL;
-    }
-
-    if (type == MINER) {
-        const int idx = state.abs_index(c, r);
-        if (idx >= 0 && state.mining_node[static_cast<size_t>(idx)] != 0 &&
-            can_pay_after_drain_local(e, TRANSFORM_COST)) {
-            return MACRO_MINER_TRANSFORM;
-        }
-        return MACRO_MINER_SEEK_NODE;
-    }
-
-    return MACRO_IDLE;
-}
-
 // Average per-robot macro priors into a joint-plan prior. Candidate priors are
 // normalized during expansion, so absolute scale only matters before that step.
 float candidate_prior(const Hyperparameters& hyperparameters, const PlanCandidate& candidate) {
@@ -139,13 +67,19 @@ int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparam
         return 0;
     }
 
+    PrimitiveActions baseline_actions{};
+    baseline_actions.clear();
+    std::array<MacroAction, MAX_ROBOTS> baseline_macros{};
+    baseline_macros.fill(MACRO_IDLE);
+    sim.fill_heuristic_plan_for_owner(root_player, baseline_actions, &baseline_macros);
+
     PlanCandidate baseline{};
     baseline.plan_count = controlled_count;
     for (int i = 0; i < controlled_count; ++i) {
         const int robot_index = controlled[static_cast<size_t>(i)];
         detail::copy_uid(baseline.uid[static_cast<size_t>(i)],
                          sim.state.robots.uid[static_cast<size_t>(robot_index)].data());
-        baseline.macro[static_cast<size_t>(i)] = default_macro_for_robot(sim.state, robot_index, root_player);
+        baseline.macro[static_cast<size_t>(i)] = baseline_macros[static_cast<size_t>(robot_index)];
     }
     baseline.prior = candidate_prior(hyperparameters, baseline) * hyperparameters.baseline_prior_multiplier;
 
@@ -165,6 +99,14 @@ int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparam
             candidate.prior = candidate_prior(hyperparameters, candidate);
             candidates[static_cast<size_t>(count++)] = candidate;
         }
+    }
+
+    float strongest_deviation = 0.0F;
+    for (int i = 1; i < count; ++i) {
+        strongest_deviation = std::max(strongest_deviation, candidates[static_cast<size_t>(i)].prior);
+    }
+    if (count > 1 && candidates[0].prior <= strongest_deviation) {
+        candidates[0].prior = strongest_deviation + std::max(0.001F, strongest_deviation * 0.001F);
     }
 
     return count;
@@ -239,37 +181,33 @@ int select_child(const MCTSArena& arena, int node_index, const Hyperparameters& 
     return best;
 }
 
-int find_plan_entry(const MCTSNode& node, std::string_view uid) {
-    for (int i = 0; i < node.plan_count; ++i) {
-        if (detail::uid_equal(node.plan_uid[static_cast<size_t>(i)], uid)) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 void fill_heuristic_actions(const CrawlerSim& sim, PrimitiveActions& actions) {
     actions.clear();
-    for (int i = 0; i < sim.state.robots.used; ++i) {
-        if (sim.state.robots.alive[static_cast<size_t>(i)] == 0) {
-            continue;
-        }
-        const int owner = sim.state.robots.owner[static_cast<size_t>(i)];
-        if (owner == 0 || owner == 1) {
-            actions.actions[static_cast<size_t>(i)] = sim.heuristic_action_for_owner(i, owner);
-        }
-    }
+    sim.fill_heuristic_plan_for_owner(0, actions, nullptr);
+    sim.fill_heuristic_plan_for_owner(1, actions, nullptr);
 }
 
 void apply_node_plan(CrawlerSim& sim, const MCTSNode& node, int root_player) {
     PrimitiveActions actions{};
-    fill_heuristic_actions(sim, actions);
+    actions.clear();
+    std::array<MacroAction, MAX_ROBOTS> baseline_macros{};
+    baseline_macros.fill(MACRO_IDLE);
+    if (root_player == 0) {
+        sim.fill_heuristic_plan_for_owner(0, actions, &baseline_macros);
+        sim.fill_heuristic_plan_for_owner(1, actions, nullptr);
+    } else {
+        sim.fill_heuristic_plan_for_owner(0, actions, nullptr);
+        sim.fill_heuristic_plan_for_owner(1, actions, &baseline_macros);
+    }
 
     for (int i = 0; i < node.plan_count; ++i) {
         const int robot_index = sim.state.robots.find_uid(node.plan_uid[static_cast<size_t>(i)].data());
         if (robot_index < 0 ||
             sim.state.robots.alive[static_cast<size_t>(robot_index)] == 0 ||
             sim.state.robots.owner[static_cast<size_t>(robot_index)] != root_player) {
+            continue;
+        }
+        if (node.plan_macro[static_cast<size_t>(i)] == baseline_macros[static_cast<size_t>(robot_index)]) {
             continue;
         }
         actions.actions[static_cast<size_t>(robot_index)] =
@@ -392,20 +330,33 @@ int best_root_child(const MCTSArena& arena, int root) {
 ActionResult build_result_from_plan(const CrawlerSim& sim, const MCTSNode* node) {
     ActionResult result{};
     result.clear();
+    PrimitiveActions actions{};
+    actions.clear();
+    std::array<MacroAction, MAX_ROBOTS> baseline_macros{};
+    baseline_macros.fill(MACRO_IDLE);
+    sim.fill_heuristic_plan_for_owner(sim.state.player, actions, &baseline_macros);
+
+    if (node != nullptr) {
+        for (int i = 0; i < node->plan_count; ++i) {
+            const int robot_index = sim.state.robots.find_uid(node->plan_uid[static_cast<size_t>(i)].data());
+            if (robot_index < 0 ||
+                sim.state.robots.alive[static_cast<size_t>(robot_index)] == 0 ||
+                sim.state.robots.owner[static_cast<size_t>(robot_index)] != sim.state.player ||
+                node->plan_macro[static_cast<size_t>(i)] == baseline_macros[static_cast<size_t>(robot_index)]) {
+                continue;
+            }
+            actions.actions[static_cast<size_t>(robot_index)] =
+                sim.primitive_for_macro(robot_index, node->plan_macro[static_cast<size_t>(i)]);
+        }
+    }
+
     for (int i = 0; i < sim.state.robots.used; ++i) {
         if (sim.state.robots.alive[static_cast<size_t>(i)] == 0 ||
             sim.state.robots.owner[static_cast<size_t>(i)] != sim.state.player) {
             continue;
         }
-
-        Action action = sim.heuristic_action_for(i);
-        if (node != nullptr) {
-            const int plan_entry = find_plan_entry(*node, sim.state.robots.uid[static_cast<size_t>(i)].data());
-            if (plan_entry >= 0) {
-                action = sim.primitive_for_macro(i, node->plan_macro[static_cast<size_t>(plan_entry)]);
-            }
-        }
-        result.add(sim.state.robots.uid[static_cast<size_t>(i)].data(), action);
+        result.add(sim.state.robots.uid[static_cast<size_t>(i)].data(),
+                   actions.actions[static_cast<size_t>(i)]);
     }
     return result;
 }

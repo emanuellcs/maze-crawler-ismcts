@@ -115,6 +115,7 @@ enum Action : uint8_t {
 // instead of the full primitive Cartesian product.
 enum MacroAction : uint8_t {
     MACRO_IDLE = 0,
+    MACRO_FACTORY_SUPPORT_WORKER,
     MACRO_FACTORY_SAFE_ADVANCE,
     MACRO_FACTORY_BUILD_WORKER,
     MACRO_FACTORY_BUILD_SCOUT,
@@ -376,6 +377,8 @@ public:
     void step(const PrimitiveActions& actions);
     [[nodiscard]] Action heuristic_action_for(int robot_index) const;
     [[nodiscard]] Action heuristic_action_for_owner(int robot_index, int owner) const;
+    void fill_heuristic_plan_for_owner(int owner, PrimitiveActions& actions,
+                                       std::array<MacroAction, MAX_ROBOTS>* baseline_macros = nullptr) const;
     [[nodiscard]] MacroList generate_macros_for(int robot_index) const;
     [[nodiscard]] Action primitive_for_macro(int robot_index, MacroAction macro) const;
 };

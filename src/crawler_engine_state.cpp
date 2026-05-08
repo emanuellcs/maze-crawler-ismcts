@@ -88,6 +88,7 @@ const char* action_name(Action action) {
 
 const char* macro_action_name(MacroAction macro) {
     switch (macro) {
+        case MACRO_FACTORY_SUPPORT_WORKER: return "FACTORY_SUPPORT_WORKER";
         case MACRO_FACTORY_SAFE_ADVANCE: return "FACTORY_SAFE_ADVANCE";
         case MACRO_FACTORY_BUILD_WORKER: return "FACTORY_BUILD_WORKER";
         case MACRO_FACTORY_BUILD_SCOUT: return "FACTORY_BUILD_SCOUT";
