@@ -1,7 +1,15 @@
 #include "crawler_engine_internal.hpp"
 
-// Player-centric belief maintenance and hidden-state determinization. This file
-// should not contain turn-resolution mechanics; it only prepares rollout states.
+/**
+ * @file crawler_engine_belief.cpp
+ * @brief Player-centric fog-of-war memory and hidden-state Determinization.
+ *
+ * The Belief State is the information-set boundary of the engine.  It preserves
+ * facts that the rules allow the player to remember, clears facts that vanish
+ * outside vision, diffuses hidden enemy probability fields through plausible
+ * motion, and samples concrete BoardState instances for ISMCTS Rollouts.  It
+ * deliberately contains no turn-resolution mechanics; CrawlerSim owns the rules.
+ */
 
 #include <algorithm>
 #include <array>
@@ -12,8 +20,18 @@ namespace {
 
 constexpr float EPS = 1.0e-6F;
 
-// Enemy belief diffusion treats unknown passable neighbors as possible motion
-// targets and keeps probability mass stationary as one option.
+/**
+ * @brief Test whether enemy probability mass may diffuse through an edge.
+ * @param belief Current player-centric Belief State.
+ * @param c Source column.
+ * @param r Source row.
+ * @param direction Candidate motion direction.
+ * @return True when known walls do not forbid the move and the destination is active.
+ *
+ * Unknown walls are treated as potentially passable so the belief does not
+ * over-prune hidden enemies.  Staying stationary is handled separately as an
+ * additional diffusion choice.
+ */
 bool can_diffuse_through(const BeliefState& belief, int c, int r, Direction direction) {
     if (c < 0 || c >= WIDTH || r < 0 || r >= MAX_ROWS) {
         return false;
@@ -27,8 +45,18 @@ bool can_diffuse_through(const BeliefState& belief, int c, int r, Direction dire
     return nc >= 0 && nc < WIDTH && nr >= belief.south_bound && nr <= belief.north_bound && nr < MAX_ROWS;
 }
 
-// Expand one enemy type's probability field by the distance it could have moved
-// since the last observation.
+/**
+ * @brief Diffuse one enemy type's probability field over elapsed turns.
+ * @param belief Belief State to mutate.
+ * @param type RobotType whose hidden locations are being propagated.
+ * @param elapsed Number of public steps since the previous observation.
+ *
+ * The model spreads probability uniformly over legal neighbor moves plus the
+ * stationary option.  Scouts can move every turn; slower units use their move
+ * period to cap the diffusion radius.  The result is not a perfect Bayesian
+ * filter, but it is cheap, deterministic, and good enough to seed ISMCTS
+ * Determinizations without allocating graph structures.
+ */
 void diffuse_enemy_type(BeliefState& belief, int type, int elapsed) {
     const int period = move_period(static_cast<uint8_t>(type));
     const int radius = (type == SCOUT) ? elapsed : ((elapsed + period - 1) / period);
@@ -57,6 +85,7 @@ void diffuse_enemy_type(BeliefState& belief, int type, int elapsed) {
                 }
             }
             const float share = p / static_cast<float>(choices);
+            /* Keep one share at the current cell so hidden robots may wait or be blocked by cooldown. */
             next[static_cast<size_t>(idx)] += share;
             for (Direction d : dirs) {
                 if (!can_diffuse_through(belief, c, r, d)) {
@@ -74,7 +103,9 @@ void diffuse_enemy_type(BeliefState& belief, int type, int elapsed) {
 
 }  // namespace
 
-// Reset to an empty player-centric belief before any observations arrive.
+/**
+ * @brief Reset belief memory before any observations have been merged.
+ */
 void BeliefState::reset() {
     player = 0;
     turn = 0;
@@ -93,8 +124,15 @@ void BeliefState::reset() {
     }
 }
 
-// Merge the current visible observation, clear impossible enemy locations, and
-// preserve remembered map/mine facts.
+/**
+ * @brief Merge one fixed-buffer observation into the Belief State.
+ * @param obs Latest observation decoded by pybind.
+ *
+ * Visible own-robot ranges define cells where hidden enemies are impossible.
+ * Walls and mines are durable memories; crystals are visible-only and are
+ * cleared when a visible cell no longer reports one.  Observed enemies collapse
+ * their per-type probability field into a delta distribution at the seen cell.
+ */
 void BeliefState::update_from_observation(const ObservationInput& obs) {
     const int new_turn = obs.step >= 0 ? obs.step : turn + 1;
     const int elapsed = std::max(1, new_turn - turn);
@@ -121,6 +159,7 @@ void BeliefState::update_from_observation(const ObservationInput& obs) {
                 if (c < 0 || c >= WIDTH || r < 0 || r >= MAX_ROWS) {
                     continue;
                 }
+                /* Vision is Manhattan-distance based, so nested loops use the remaining radius after |dc|. */
                 currently_visible[static_cast<size_t>(r * WIDTH + c)] = 1;
             }
         }
@@ -135,6 +174,7 @@ void BeliefState::update_from_observation(const ObservationInput& obs) {
                 wall[static_cast<size_t>(abs)] = static_cast<uint8_t>(obs.walls[static_cast<size_t>(local)]);
             }
             if (currently_visible[static_cast<size_t>(abs)] != 0) {
+                /* Facts not remembered by the environment must disappear once the cell is seen empty. */
                 visible_crystal[static_cast<size_t>(abs)] = 0;
                 remembered_mine_energy[static_cast<size_t>(abs)] = 0;
                 remembered_mine_max[static_cast<size_t>(abs)] = 0;
@@ -189,8 +229,16 @@ void BeliefState::update_from_observation(const ObservationInput& obs) {
     turn = new_turn;
 }
 
-// Sample one concrete hidden state for rollout. Known facts are copied exactly;
-// unknown future rows and enemy locations are filled deterministically from seed.
+/**
+ * @brief Sample one concrete BoardState from the current information set.
+ * @param seed Deterministic seed used for generated rows and enemy sampling.
+ * @return Concrete hidden-state sample for one ISMCTS iteration.
+ *
+ * Known facts are copied exactly.  Unknown rows near the frontier are filled by
+ * the optimistic symmetric row generator so Rollouts can reason beyond current
+ * vision.  Enemy probability fields are sampled independently by type into
+ * lightweight generated robots owned by the opponent.
+ */
 BoardState BeliefState::determinize(uint64_t seed) const {
     BoardState result{};
     result.reset();
@@ -217,6 +265,7 @@ BoardState BeliefState::determinize(uint64_t seed) const {
             }
         }
         if (row_unknown) {
+            /* Generated rows are hypotheses only; future observations overwrite wall_known facts. */
             detail::generate_optimistic_row(result, r, seed);
         }
     }
@@ -240,6 +289,7 @@ BoardState BeliefState::determinize(uint64_t seed) const {
             }
         }
         if (selected >= 0) {
+            /* Synthetic UIDs are sufficient for hidden enemies because controlled plans are UID-keyed to observed robots. */
             const int slot = result.robots.add_generated_robot(
                 result.next_generated_uid++, static_cast<uint8_t>(type), static_cast<uint8_t>(enemy_owner),
                 detail::cell_col(selected), detail::cell_row(selected), max_energy(static_cast<uint8_t>(type)) / 2);

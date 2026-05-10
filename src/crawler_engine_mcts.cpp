@@ -1,8 +1,16 @@
 #include "crawler_engine_internal.hpp"
 
-// Fixed-arena Information Set MCTS over bounded joint macro actions. Nodes are
-// action-history information sets; each iteration samples a concrete board from
-// belief and replays the selected macro history through that determinization.
+/**
+ * @file crawler_engine_mcts.cpp
+ * @brief Fixed-arena Information Set Monte Carlo Tree Search over joint macro plans.
+ *
+ * The tree is an information-set search: each iteration samples a concrete
+ * BoardState from the Belief State, replays the selected UID-keyed macro history
+ * through that Determinization, performs deterministic Rollouts, and
+ * backpropagates a root-player value.  Expansion is bounded by a deterministic
+ * baseline joint plan plus one-robot MacroAction deviations, avoiding the
+ * primitive simultaneous-action Cartesian product.
+ */
 
 #include <algorithm>
 #include <array>
@@ -15,7 +23,13 @@ namespace {
 
 constexpr uint64_t ITERATION_SEED = 0x9e3779b97f4a7c15ULL;
 
-// One root child represents a bounded joint macro plan for the controlled side.
+/**
+ * @brief Candidate joint macro plan considered during node expansion.
+ *
+ * Each plan stores controlled robot UIDs and macro intents rather than local
+ * robot indices.  That keeps the action history replayable across sampled
+ * Determinizations where hidden robots and slot ordering may differ.
+ */
 struct PlanCandidate {
     int plan_count = 0;
     float prior = 1.0F;
@@ -23,7 +37,9 @@ struct PlanCandidate {
     std::array<MacroAction, MAX_MCTS_PLAN_ROBOTS> macro{};
 };
 
-// Compact aggregate features used by the rollout evaluator.
+/**
+ * @brief Aggregate material features used by the rollout evaluator.
+ */
 struct EvalStats {
     std::array<int64_t, 2> energy{0, 0};
     std::array<int, 2> units{0, 0};
@@ -32,8 +48,16 @@ struct EvalStats {
     std::array<int, 2> best_factory_row{0, 0};
 };
 
-// Average per-robot macro priors into a joint-plan prior. Candidate priors are
-// normalized during expansion, so absolute scale only matters before that step.
+/**
+ * @brief Compute an unnormalized prior for a joint macro candidate.
+ * @param hyperparameters Runtime search hyperparameters.
+ * @param candidate Candidate joint macro plan.
+ * @return Positive prior mass before expansion-level normalization.
+ *
+ * The prior is the arithmetic mean of participating per-macro priors.  Expansion
+ * later normalizes all candidates so only relative scale matters; this lets
+ * tuning adjust strategic preference without changing tree code.
+ */
 float candidate_prior(const Hyperparameters& hyperparameters, const PlanCandidate& candidate) {
     if (candidate.plan_count <= 0) {
         return 0.10F;
@@ -45,6 +69,13 @@ float candidate_prior(const Hyperparameters& hyperparameters, const PlanCandidat
     return std::max(0.05F, sum / static_cast<float>(candidate.plan_count));
 }
 
+/**
+ * @brief Collect controlled live robot slots up to the MCTS plan cap.
+ * @param state Concrete board state.
+ * @param owner Player whose robots should be controlled.
+ * @param controlled Output slot list.
+ * @return Number of collected robots.
+ */
 int collect_controlled_robots(const BoardState& state, int owner,
                               std::array<int, MAX_MCTS_PLAN_ROBOTS>& controlled) {
     int count = 0;
@@ -57,8 +88,20 @@ int collect_controlled_robots(const BoardState& state, int owner,
     return count;
 }
 
-// Build the baseline joint plan plus one-robot deviations. This is the primary
-// branching control that keeps MCTS bounded under large unit counts.
+/**
+ * @brief Generate bounded joint macro candidates for one expansion.
+ * @param sim Concrete simulator state at the node.
+ * @param root_player Player controlled by the search.
+ * @param hyperparameters Runtime prior weights.
+ * @param candidates Output candidate buffer.
+ * @return Number of candidates written.
+ *
+ * A naive simultaneous-move tree branches as `product(|A_r|)` over controlled
+ * robots.  This generator instead emits one deterministic all-robot baseline
+ * and one-robot deviations from that baseline, capped by
+ * `MAX_MCTS_CANDIDATES`.  The result is approximately linear branching while
+ * preserving coordinated rollout behavior for robots not under deviation.
+ */
 int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparameters& hyperparameters,
                         std::array<PlanCandidate, MAX_MCTS_CANDIDATES>& candidates) {
     std::array<int, MAX_MCTS_PLAN_ROBOTS> controlled{};
@@ -106,14 +149,18 @@ int generate_candidates(const CrawlerSim& sim, int root_player, const Hyperparam
         strongest_deviation = std::max(strongest_deviation, candidates[static_cast<size_t>(i)].prior);
     }
     if (count > 1 && candidates[0].prior <= strongest_deviation) {
+        /* Ensure the strong deterministic baseline remains selectable even when one tuned deviation has higher prior. */
         candidates[0].prior = strongest_deviation + std::max(0.001F, strongest_deviation * 0.001F);
     }
 
     return count;
 }
 
-// Copy UID-keyed plans into tree nodes so sampled determinizations can replay
-// the same action history even when simulator-local robot slots differ.
+/**
+ * @brief Copy one candidate plan into a persistent MCTS node edge.
+ * @param candidate Candidate generated during expansion.
+ * @param node Destination tree node.
+ */
 void copy_candidate_to_node(const PlanCandidate& candidate, MCTSNode& node) {
     node.plan_count = candidate.plan_count;
     for (int i = 0; i < candidate.plan_count; ++i) {
@@ -122,6 +169,18 @@ void copy_candidate_to_node(const PlanCandidate& candidate, MCTSNode& node) {
     }
 }
 
+/**
+ * @brief Expand a tree node with normalized joint macro children.
+ * @param arena Fixed node arena.
+ * @param node_index Node to expand.
+ * @param sim Concrete simulator state corresponding to the node.
+ * @param root_player Search player.
+ * @param hyperparameters Runtime search parameters.
+ *
+ * Child priors are normalized over the candidate set and stored for PUCT.  The
+ * sibling list is singly linked inside the arena, avoiding per-node dynamic
+ * containers in the search hot path.
+ */
 void expand_node(MCTSArena& arena, int node_index, const CrawlerSim& sim, int root_player,
                  const Hyperparameters& hyperparameters) {
     MCTSNode& parent = arena.nodes[static_cast<size_t>(node_index)];
@@ -160,6 +219,18 @@ void expand_node(MCTSArena& arena, int node_index, const CrawlerSim& sim, int ro
     }
 }
 
+/**
+ * @brief Select the highest-scoring child under the PUCT rule.
+ * @param arena Fixed node arena.
+ * @param node_index Parent node index.
+ * @param hyperparameters Runtime search parameters containing `C_puct`.
+ * @return Selected child index, or `-1` if no child exists.
+ *
+ * Selection score is `Q + U`, where `Q = value_sum / visits` and
+ * `U = C_puct * prior * sqrt(parent_visits + 1) / (child_visits + 1)`.
+ * The prior term accelerates promising macro intents early; the visit divisor
+ * shifts pressure toward underexplored children as evidence accumulates.
+ */
 int select_child(const MCTSArena& arena, int node_index, const Hyperparameters& hyperparameters) {
     const MCTSNode& parent = arena.nodes[static_cast<size_t>(node_index)];
     const float parent_sqrt = std::sqrt(static_cast<float>(parent.visits + 1));
@@ -181,12 +252,27 @@ int select_child(const MCTSArena& arena, int node_index, const Hyperparameters& 
     return best;
 }
 
+/**
+ * @brief Fill deterministic baseline actions for both players.
+ * @param sim Concrete simulator state.
+ * @param actions Output primitive action buffer.
+ */
 void fill_heuristic_actions(const CrawlerSim& sim, PrimitiveActions& actions) {
     actions.clear();
     sim.fill_heuristic_plan_for_owner(0, actions, nullptr);
     sim.fill_heuristic_plan_for_owner(1, actions, nullptr);
 }
 
+/**
+ * @brief Apply one MCTS node's UID-keyed macro plan to a concrete simulator.
+ * @param sim Concrete simulator to mutate by one step.
+ * @param node Tree node whose edge plan should be played.
+ * @param root_player Search-controlled player.
+ *
+ * Robots not explicitly changed by the node keep their deterministic heuristic
+ * action.  This preserves coordinated baseline behavior while allowing the tree
+ * to evaluate one-robot deviations.
+ */
 void apply_node_plan(CrawlerSim& sim, const MCTSNode& node, int root_player) {
     PrimitiveActions actions{};
     actions.clear();
@@ -217,6 +303,17 @@ void apply_node_plan(CrawlerSim& sim, const MCTSNode& node, int root_player) {
     sim.step(actions);
 }
 
+/**
+ * @brief Evaluate a concrete state from the root player's perspective.
+ * @param state Concrete board state.
+ * @param root_player Search-controlled player.
+ * @return Smooth value in `[-1, 1]`.
+ *
+ * Terminal/tiebreak states follow the competition priorities: Factory survival,
+ * energy, then unit count.  Non-terminal states blend energy, material, unit
+ * count, Factory progress, and scroll-margin features to give Rollouts a
+ * continuous gradient before the true terminal horizon.
+ */
 float evaluate_state(const BoardState& state, int root_player) {
     const int opponent = 1 - root_player;
     EvalStats stats{};
@@ -284,8 +381,17 @@ float evaluate_state(const BoardState& state, int root_player) {
                       -1.0F, 1.0F);
 }
 
-// Rollouts deliberately use deterministic heuristics for both players; all
-// stochasticity enters through determinization, not through playout policy RNG.
+/**
+ * @brief Roll a sampled state forward with deterministic heuristic policy.
+ * @param sim Concrete simulator state to advance.
+ * @param root_player Search-controlled player.
+ * @param rollout_depth Maximum rollout horizon.
+ * @return Evaluator value after rollout termination or horizon.
+ *
+ * Stochasticity enters through Determinization, not through the playout policy.
+ * Keeping Rollouts deterministic reduces variance and makes visit statistics
+ * reflect hidden-state samples rather than random action noise.
+ */
 float rollout(CrawlerSim& sim, int root_player, int rollout_depth) {
     PrimitiveActions actions{};
     for (int depth = 0; depth < rollout_depth && !sim.state.done; ++depth) {
@@ -295,6 +401,13 @@ float rollout(CrawlerSim& sim, int root_player, int rollout_depth) {
     return evaluate_state(sim.state, root_player);
 }
 
+/**
+ * @brief Backpropagate one rollout value over the selected tree path.
+ * @param arena Fixed node arena.
+ * @param path Node indices visited in this iteration.
+ * @param path_count Number of valid path entries.
+ * @param value Root-player rollout value.
+ */
 void backpropagate(MCTSArena& arena, const std::array<int, MCTS_TREE_DEPTH + 2>& path,
                    int path_count, float value) {
     for (int i = 0; i < path_count; ++i) {
@@ -304,6 +417,12 @@ void backpropagate(MCTSArena& arena, const std::array<int, MCTS_TREE_DEPTH + 2>&
     }
 }
 
+/**
+ * @brief Choose the most robust root child after search.
+ * @param arena Fixed node arena.
+ * @param root Root node index.
+ * @return Child with most visits, breaking ties by mean value.
+ */
 int best_root_child(const MCTSArena& arena, int root) {
     const MCTSNode& root_node = arena.nodes[static_cast<size_t>(root)];
     int best = -1;
@@ -327,6 +446,12 @@ int best_root_child(const MCTSArena& arena, int root) {
     return best;
 }
 
+/**
+ * @brief Build Python-facing primitive actions from a selected root plan.
+ * @param sim Current concrete simulator snapshot.
+ * @param node Selected root child, or nullptr for deterministic baseline.
+ * @return Fixed-buffer UID/action result.
+ */
 ActionResult build_result_from_plan(const CrawlerSim& sim, const MCTSNode* node) {
     ActionResult result{};
     result.clear();
@@ -363,10 +488,20 @@ ActionResult build_result_from_plan(const CrawlerSim& sim, const MCTSNode* node)
 
 }  // namespace
 
+/**
+ * @brief Rewind the fixed node arena for a new turn.
+ */
 void MCTSArena::reset() {
     used = 0;
 }
 
+/**
+ * @brief Allocate and initialize a node from the fixed arena.
+ * @param parent Parent node index, or `-1` for root.
+ * @param depth Tree depth.
+ * @param prior Normalized PUCT prior.
+ * @return Node index, or `-1` if the arena is full.
+ */
 int MCTSArena::create_node(int parent, int depth, float prior) {
     if (used >= MAX_TREE_NODES) {
         return -1;
@@ -386,6 +521,17 @@ int MCTSArena::create_node(int parent, int depth, float prior) {
     return index;
 }
 
+/**
+ * @brief Select actions for the current player under a time budget.
+ * @param time_budget_ms Milliseconds available to search.
+ * @param seed Root seed for deterministic per-iteration samples.
+ * @return UID/action buffer for all controlled live robots.
+ *
+ * The loop stops when either the deadline is reached or the fixed arena is full.
+ * Each iteration samples a Determinization from belief, traverses/expands the
+ * information-set tree with PUCT, rolls out deterministic policy, and
+ * backpropagates the root-player value.
+ */
 ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
     bool has_controlled_robot = false;
     for (int i = 0; i < sim.state.robots.used; ++i) {
@@ -422,6 +568,10 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
         }
 
         CrawlerSim search_sim{};
+        /*
+         * The seed sequence combines the caller seed with an iteration constant
+         * so consecutive samples explore different hidden worlds reproducibly.
+         */
         search_sim.state = determinize(detail::mix64(seed ^ (static_cast<uint64_t>(iterations + 1) * ITERATION_SEED)));
 
         std::array<int, MCTS_TREE_DEPTH + 2> path{};
@@ -467,6 +617,11 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
     return build_result_from_plan(sim, &mcts.nodes[static_cast<size_t>(best_child)]);
 }
 
+/**
+ * @brief Return the rollout evaluator value for the current simulator snapshot.
+ * @param player Perspective player, or invalid value to use the engine player.
+ * @return Smooth evaluator value in `[-1, 1]`.
+ */
 float Engine::debug_mcts_value(int player) const {
     const int eval_player = (player == 0 || player == 1) ? player : sim.state.player;
     return evaluate_state(sim.state, eval_player);

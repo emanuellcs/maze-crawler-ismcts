@@ -1,4 +1,11 @@
-"""Kaggle entrypoint for the Maze Crawler C++ engine."""
+"""Kaggle entrypoint for the fixed-buffer Maze Crawler ISMCTS engine.
+
+The module owns the Python side of the runtime contract: import or JIT-compile
+the native pybind11 extension, cache one C++ ``Engine`` per player, translate
+Kaggle observations into the native observation schema, and return
+``{uid: action_string}`` dictionaries.  All search, Belief State
+Determinization, Bitboard logic, Rollouts, and simulator rules run in C++.
+"""
 
 from __future__ import annotations
 
@@ -46,13 +53,27 @@ BEST_PARAMS = {
 
 
 def _jit_log(message):
-    """Emit native-build diagnostics to stderr without polluting action output."""
+    """Emit native-build diagnostics to stderr without polluting actions.
+
+    Parameters
+    ----------
+    message:
+        Human-readable JIT status or compiler diagnostic.
+    """
 
     print(f"[crawler_engine jit] {message}", file=sys.stderr, flush=True)
 
 
 def _pybind11_include_dir():
-    """Locate pybind11 headers from the submission vendor tree or dev install."""
+    """Locate pybind11 headers from the bundle or development environment.
+
+    Returns
+    -------
+    pathlib.Path | None
+        Directory containing ``pybind11/pybind11.h``.  Kaggle source bundles use
+        ``vendor/pybind11/include``; local development may use the installed
+        ``pybind11`` package.
+    """
 
     candidates = []
     vendor = _ROOT / "vendor" / "pybind11" / "include"
@@ -71,7 +92,14 @@ def _pybind11_include_dir():
 
 
 def _python_include_dirs():
-    """Return Python include directories for the active Kaggle interpreter."""
+    """Return Python include directories for the active interpreter.
+
+    Returns
+    -------
+    list[pathlib.Path | str]
+        Existing include and platform-include directories reported by
+        ``sysconfig``.  These paths are passed directly to the JIT compiler.
+    """
 
     paths = sysconfig.get_paths()
     include_dirs = []
@@ -83,7 +111,15 @@ def _python_include_dirs():
 
 
 def _compile_native_engine():
-    """JIT-compile crawler_engine when Kaggle has no compatible prebuilt module."""
+    """JIT-compile ``crawler_engine`` when no compatible extension is present.
+
+    Returns
+    -------
+    bool
+        ``True`` when compilation succeeds and writes a Python extension beside
+        ``main.py``; ``False`` when sources, headers, compiler invocation, or
+        build output are unavailable.
+    """
 
     sources = sorted((_ROOT / "src").glob("*.cpp"))
     if not sources:
@@ -145,7 +181,14 @@ def _compile_native_engine():
 
 
 def _ensure_native_engine():
-    """Import or build the native extension once per Python process."""
+    """Import or build the native extension once per Python process.
+
+    Returns
+    -------
+    bool
+        ``True`` when the module-level ``crawler_engine`` reference is usable.
+        The function is idempotent so repeated Kaggle calls do not rebuild.
+    """
 
     global crawler_engine, _JIT_ATTEMPTED
     if crawler_engine is not None:
@@ -174,7 +217,18 @@ def _ensure_native_engine():
 
 
 def _get(obj, name, default=None):
-    """Read fields from either Kaggle dict observations or SimpleNamespace tests."""
+    """Read a field from Kaggle objects, dictionaries, or test stubs.
+
+    Parameters
+    ----------
+    obj:
+        Observation or configuration object.  Supported forms are dict-like
+        objects and objects with attributes, such as ``SimpleNamespace``.
+    name:
+        Field name to read.
+    default:
+        Value returned when the field is absent.
+    """
 
     if isinstance(obj, dict):
         return obj.get(name, default)
@@ -182,13 +236,46 @@ def _get(obj, name, default=None):
 
 
 def _cfg(config, name, default):
-    """Read configuration values with a default for local smoke objects."""
+    """Read a configuration value with a local-test default.
+
+    Parameters
+    ----------
+    config:
+        Kaggle configuration object or dict.
+    name:
+        Configuration field name.
+    default:
+        Fallback used by minimal smoke-test objects.
+    """
 
     return _get(config, name, default)
 
 
 def _fallback_agent(obs, config):
-    """Minimal legal policy used only when native compilation/import fails."""
+    """Return legal actions when the native extension cannot run.
+
+    Parameters
+    ----------
+    obs:
+        Kaggle observation with fields ``player``, ``walls``, ``robots``,
+        ``southBound``, and optional resource dictionaries.  ``walls`` is a flat
+        active-window sequence indexed as ``(row - southBound) * width + col``.
+        ``robots`` maps UID strings to
+        ``[type, col, row, energy, owner, move_cd, jump_cd, build_cd]``.
+    config:
+        Kaggle configuration object containing ``width``, ``workerCost``, and
+        ``wallRemoveCost``; local tests may omit values and use defaults.
+
+    Returns
+    -------
+    dict[str, str]
+        Minimal ``{uid: action}`` dictionary for the controlled robots.
+
+    Notes
+    -----
+    This policy is diagnostic safety only.  It does not perform ISMCTS,
+    Determinization, Bitboard planning, or Rollouts.
+    """
 
     actions = {}
     width = _cfg(config, "width", 20)
@@ -232,7 +319,32 @@ def _fallback_agent(obs, config):
 
 
 def agent(obs, config):
-    """Kaggle entrypoint: update one persistent C++ engine and return actions."""
+    """Update the persistent native engine and return Kaggle actions.
+
+    Parameters
+    ----------
+    obs:
+        Kaggle observation object or dict.  Expected fields are:
+        ``player`` (``int``), ``step`` (``int``), ``southBound`` and
+        ``northBound`` (``int``), ``walls`` (flat length-400 sequence of wall
+        bitfields or ``-1``), ``crystals`` (``{"col,row": energy}``),
+        ``robots`` (``{"uid": [type, col, row, energy, owner, move_cd,
+        jump_cd, build_cd]}``), ``mines`` (``{"col,row": [energy, maxEnergy,
+        owner]}``), and ``miningNodes`` (``{"col,row": 1}``).
+    config:
+        Kaggle configuration object.  The native engine uses embedded constants
+        for the rule model; the Python fallback reads a small subset directly.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping from controlled robot UID to primitive action string.
+
+    Notes
+    -----
+    The C++ engine caches Belief State per player, then samples Determinizations
+    and runs fixed-arena ISMCTS under a 2000 ms search budget.
+    """
 
     _ensure_native_engine()
     if crawler_engine is None:

@@ -1,4 +1,11 @@
-"""Regression tests for rules fidelity, search behavior, pybind, and packaging."""
+"""Regression tests for rules fidelity, ISMCTS behavior, pybind, and packaging.
+
+Fixtures use the same compact observation shape passed to the C++ bridge:
+``walls`` is a flat 400-cell active-window array, ``robots`` maps UID to
+``[type, col, row, energy, owner, move_cd, jump_cd, build_cd]``, ``crystals`` and
+``nodes`` use ``{"col,row": value}``, and ``mines`` uses
+``{"col,row": [energy, maxEnergy, owner]}``.
+"""
 
 from __future__ import annotations
 
@@ -48,7 +55,7 @@ VALID_ACTIONS = {
 
 
 def open_walls():
-    """Build a deterministic mostly-open wall array with fixed border/center walls."""
+    """Build a deterministic open wall array with fixed border and center walls."""
 
     walls = np.zeros(WIDTH * HEIGHT, dtype=np.int16)
     for r in range(HEIGHT):
@@ -71,7 +78,18 @@ def make_engine(
     south_bound=0,
     north_bound=19,
 ):
-    """Create an engine from a compact Kaggle-style observation fixture."""
+    """Create an engine from a compact Kaggle-style observation fixture.
+
+    Parameters
+    ----------
+    robots:
+        Mapping from UID to ``[type, col, row, energy, owner, move_cd, jump_cd,
+        build_cd]``.
+    walls:
+        Optional flat active-window wall array of length 400.
+    crystals, mines, nodes:
+        Sparse resource dictionaries keyed by ``"col,row"``.
+    """
 
     engine = crawler_engine.Engine(0)
     engine.update_observation(
@@ -89,7 +107,7 @@ def make_engine(
 
 
 def robot_by_uid(state, uid):
-    """Find a robot in debug_state output and fail with a useful test message."""
+    """Find a robot in ``debug_state`` output and fail with a useful message."""
 
     for robot in state["robotList"]:
         if robot["uid"] == uid:
@@ -98,6 +116,8 @@ def robot_by_uid(state, uid):
 
 
 def test_bridge_smoke():
+    """Verify the pybind Engine can ingest an observation and return actions."""
+
     engine = make_engine({"f0": [0, 5, 2, 1000, 0, 0, 0, 0]})
     actions = engine.choose_actions(10, seed=1)
     assert isinstance(actions, dict)
@@ -112,6 +132,8 @@ def test_bridge_smoke():
 
 
 def test_hyperparameters_roundtrip_validation_and_action_generation():
+    """Validate pybind hyperparameter IO and ensure search still returns actions."""
+
     engine = make_engine({"f0": [0, 5, 2, 1000, 0, 0, 0, 0]})
     defaults = engine.get_hyperparameters()
     assert defaults["C_puct"] == pytest.approx(2.0884330868271443)
@@ -146,6 +168,8 @@ def test_hyperparameters_roundtrip_validation_and_action_generation():
 
 
 def test_opponent_policy_factory_supports_adjacent_worker():
+    """Protect the Factory support macro that transfers energy to Workers."""
+
     engine = make_engine(
         {
             "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
@@ -158,6 +182,8 @@ def test_opponent_policy_factory_supports_adjacent_worker():
 
 
 def test_opponent_policy_factory_emergency_jumps_north():
+    """Protect the emergency Factory jump used near the scrolling south bound."""
+
     engine = make_engine(
         {"f0": [0, 5, 6, 1000, 0, 0, 0, 0]},
         south_bound=5,
@@ -169,6 +195,8 @@ def test_opponent_policy_factory_emergency_jumps_north():
 
 
 def test_opponent_policy_worker_removes_blocking_north_wall():
+    """Protect the Worker wall-opening macro used by the baseline policy."""
+
     walls = open_walls()
     walls[2 * WIDTH + 5] |= WALL_N
     engine = make_engine({"w0": [2, 5, 2, 150, 0, 0, 0, 0]}, walls=walls)
@@ -178,6 +206,8 @@ def test_opponent_policy_worker_removes_blocking_north_wall():
 
 
 def test_opponent_policy_scout_transfers_to_adjacent_factory():
+    """Protect Scout-to-Factory energy return when adjacent."""
+
     engine = make_engine(
         {
             "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
@@ -190,6 +220,8 @@ def test_opponent_policy_scout_transfers_to_adjacent_factory():
 
 
 def test_opponent_policy_scout_returns_when_loaded():
+    """Protect Scout return routing when carrying high energy."""
+
     engine = make_engine(
         {
             "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
@@ -202,6 +234,8 @@ def test_opponent_policy_scout_returns_when_loaded():
 
 
 def test_opponent_policy_scout_hunts_visible_crystal():
+    """Protect Scout crystal targeting from sparse visible crystal observations."""
+
     engine = make_engine(
         {"s0": [1, 5, 2, 20, 0, 0, 0, 0]},
         crystals={"5,4": 25},
@@ -212,6 +246,8 @@ def test_opponent_policy_scout_hunts_visible_crystal():
 
 
 def test_opponent_policy_scout_explores_north_without_crystals():
+    """Protect Scout exploration when no crystals are visible."""
+
     engine = make_engine({"s0": [1, 5, 2, 20, 0, 0, 0, 0]})
 
     actions = engine.choose_actions(0, seed=1)
@@ -219,6 +255,8 @@ def test_opponent_policy_scout_explores_north_without_crystals():
 
 
 def test_policy_source_avoids_dynamic_allocation_primitives():
+    """Ensure the policy hot path remains free of dynamic allocation primitives."""
+
     with open(
         os.path.join(os.path.dirname(__file__), "src", "crawler_engine_policy.cpp"),
         encoding="utf-8",
@@ -230,6 +268,8 @@ def test_policy_source_avoids_dynamic_allocation_primitives():
 
 
 def test_factory_build_spawn_before_combat():
+    """Verify Factory spawns participate as stationary combatants immediately."""
+
     engine = make_engine({"f0": [0, 5, 2, 1000, 0, 0, 0, 0]})
     engine.step({"f0": "BUILD_WORKER"})
     state = engine.debug_state()
@@ -242,6 +282,8 @@ def test_factory_build_spawn_before_combat():
 
 
 def test_same_type_annihilation_and_crystal_consumption():
+    """Verify same-type collision annihilates both robots and consumes crystals."""
+
     robots = {
         "s0": [1, 5, 4, 50, 0, 0, 0, 0],
         "s1": [1, 5, 6, 50, 1, 0, 0, 0],
@@ -253,6 +295,8 @@ def test_same_type_annihilation_and_crystal_consumption():
 
 
 def test_enemy_factories_mutually_annihilate():
+    """Verify opposing Factory collision removes both factories and ends the game."""
+
     robots = {
         "f0": [0, 5, 4, 1000, 0, 0, 0, 0],
         "f1": [0, 5, 6, 1000, 1, 0, 0, 0],
@@ -265,6 +309,8 @@ def test_enemy_factories_mutually_annihilate():
 
 
 def test_worker_crushes_scout_and_gets_crystal():
+    """Verify crush hierarchy and survivor crystal collection."""
+
     robots = {
         "w0": [2, 5, 4, 100, 0, 0, 0, 0],
         "s1": [1, 5, 6, 50, 1, 0, 0, 0],
@@ -279,6 +325,8 @@ def test_worker_crushes_scout_and_gets_crystal():
 
 
 def test_transfer_drains_source_and_caps_target():
+    """Verify transfers drain the source and cap non-Factory targets."""
+
     robots = {
         "s0": [1, 5, 5, 99, 0, 0, 0, 0],
         "w0": [2, 5, 6, 50, 0, 0, 0, 0],
@@ -293,6 +341,8 @@ def test_transfer_drains_source_and_caps_target():
 
 
 def test_transfer_to_factory_does_not_overflow_int16_range():
+    """Verify Factory energy storage handles values beyond int16 range."""
+
     robots = {
         "f0": [0, 5, 5, 40000, 0, 0, 0, 0],
         "w0": [2, 5, 6, 300, 0, 0, 0, 0],
@@ -307,6 +357,8 @@ def test_transfer_to_factory_does_not_overflow_int16_range():
 
 
 def test_factory_spawn_is_stationary_combat_participant():
+    """Verify spawned units can be crushed on the spawn cell during movement."""
+
     robots = {
         "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
         "w1": [2, 5, 4, 300, 1, 0, 0, 0],
@@ -322,6 +374,8 @@ def test_factory_spawn_is_stationary_combat_participant():
 
 
 def test_scroll_counter_reconstructed_for_high_step_observation():
+    """Verify observation reload reconstructs scroll timing at late steps."""
+
     robots = {
         "f0": [0, 5, 0, 1000, 0, 0, 0, 0],
         "f1": [0, 14, 5, 1000, 1, 0, 0, 0],
@@ -334,6 +388,8 @@ def test_scroll_counter_reconstructed_for_high_step_observation():
 
 
 def test_mcts_tiebreak_value_uses_energy_margin():
+    """Verify the rollout evaluator follows endgame energy tiebreak priority."""
+
     high_margin = make_engine(
         {
             "f0": [0, 5, 5, 2000, 0, 0, 0, 0],
@@ -353,6 +409,8 @@ def test_mcts_tiebreak_value_uses_energy_margin():
 
 
 def test_period_two_move_cooldown_blocks_next_turn():
+    """Verify period-two units must wait one turn before moving again."""
+
     robots = {
         "f0": [0, 2, 2, 1000, 0, 0, 0, 0],
         "f1": [0, 15, 2, 1000, 1, 0, 0, 0],
@@ -379,6 +437,8 @@ def test_period_two_move_cooldown_blocks_next_turn():
 
 
 def test_jump_sets_move_and_jump_cooldowns():
+    """Verify Factory jumps set both movement and jump cooldowns."""
+
     engine = make_engine({"f0": [0, 5, 5, 1000, 0, 0, 0, 0]})
     engine.step({"f0": "JUMP_NORTH"})
     state = engine.debug_state()
@@ -389,6 +449,8 @@ def test_jump_sets_move_and_jump_cooldowns():
 
 
 def test_fixed_center_wall_remove_costs_but_does_not_open():
+    """Verify fixed mirror-axis wall edits cost energy but preserve geometry."""
+
     robots = {
         "f0": [0, 2, 2, 1000, 0, 0, 0, 0],
         "f1": [0, 15, 2, 1000, 1, 0, 0, 0],
@@ -407,6 +469,8 @@ def test_fixed_center_wall_remove_costs_but_does_not_open():
 
 
 def test_offboard_jump_death():
+    """Verify Factory jumps landing outside the active board destroy the unit."""
+
     engine = make_engine({"f0": [0, 5, 19, 1000, 0, 0, 0, 0]})
     engine.step({"f0": "JUMP_NORTH"})
     state = engine.debug_state()
@@ -414,6 +478,8 @@ def test_offboard_jump_death():
 
 
 def test_mcts_respects_small_time_budget_and_returns_valid_actions():
+    """Verify ISMCTS respects tiny budgets and returns controlled legal actions."""
+
     robots = {
         "f0": [0, 5, 2, 1000, 0, 0, 0, 0],
         "w0": [2, 5, 4, 180, 0, 0, 0, 0],
@@ -432,6 +498,8 @@ def test_mcts_respects_small_time_budget_and_returns_valid_actions():
 
 
 def test_packaged_submission_jit_compiles_in_extracted_directory():
+    """Verify the Kaggle source bundle can JIT-compile in a clean directory."""
+
     package_path = package_submission.build_package()
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
