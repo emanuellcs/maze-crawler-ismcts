@@ -299,17 +299,17 @@ This hybrid model is the correct fit for a scrolling maze: absolute memory prese
 
 A naive simultaneous-move tree branches over every legal primitive action for every controlled robot:
 
-$$
+```math
 B_{\text{primitive}} = \prod_{r \in R} |A_r|
-$$
+```
 
 That is untenable as soon as the Factory has built multiple support units. This engine instead builds one deterministic baseline joint plan and then adds one-robot macro deviations:
 
-$$
+```math
 B_{\text{macro}} \le 1 + \sum_{r \in R'} \left(|M_r| - 1\right)
-$$
+```
 
-where \(R'\) is capped by `MAX_MCTS_PLAN_ROBOTS = 64`, and the final candidate list is capped by `MAX_MCTS_CANDIDATES = 64`.
+where $`R'`$ is capped by `MAX_MCTS_PLAN_ROBOTS = 64`, and the final candidate list is capped by `MAX_MCTS_CANDIDATES = 64`.
 
 This preserves coordinated baseline behavior while giving MCTS the ability to test targeted tactical alternatives: build, jump, transfer, scout, return, escort, wall-open, mine-transform, or idle.
 
@@ -317,27 +317,27 @@ This preserves coordinated baseline behavior while giving MCTS the ability to te
 
 The belief state is player-centric. Visible facts overwrite memory, remembered facts persist where the rules allow them to persist, and hidden enemies are tracked as per-type probability fields:
 
-$$
+```math
 P_t^{(k)}(x)
-$$
+```
 
-where \(k\) is robot type and \(x\) is an absolute board cell.
+where $`k`$ is robot type and $`x`$ is an absolute board cell.
 
 When enemies disappear into fog, probability mass diffuses through passable or unknown neighbor cells and can also remain stationary:
 
-$$
+```math
 P_{t+1}^{(k)}(x') \mathrel{+}= \frac{P_t^{(k)}(x)}{1 + |\mathcal{N}(x)|}
-$$
+```
 
-for \(x' \in \{x\} \cup \mathcal{N}(x)\), where \(\mathcal{N}(x)\) is the set of passable neighboring cells under known wall constraints. Current friendly vision zeroes impossible enemy locations. A newly observed enemy collapses its type distribution into a delta at the observed cell:
+for $`x' \in \{x\} \cup \mathcal{N}(x)`$, where $`\mathcal{N}(x)`$ is the set of passable neighboring cells under known wall constraints. Current friendly vision zeroes impossible enemy locations. A newly observed enemy collapses its type distribution into a delta at the observed cell:
 
-$$
+```math
 P_t^{(k)}(x) =
 \begin{cases}
 1, & x = x_{\text{observed}} \\
 0, & \text{otherwise}
 \end{cases}
-$$
+```
 
 Each MCTS iteration samples one concrete `BoardState` from these fields, copies known facts exactly, generates plausible unknown future rows, and reinserts all currently observed live robots by exact UID, position, owner, energy, and cooldown.
 
@@ -345,18 +345,18 @@ Each MCTS iteration samples one concrete `BoardState` from these fields, copies 
 
 Child selection uses PUCT:
 
-$$
+```math
 \operatorname{score}(s,a) =
 Q(s,a) +
 C_{\text{puct}} P(s,a)
 \frac{\sqrt{N(s)+1}}{N(s,a)+1}
-$$
+```
 
 where:
 
-$$
+```math
 Q(s,a) = \frac{W(s,a)}{N(s,a)}
-$$
+```
 
 `C_puct`, rollout depth, the baseline prior multiplier, and every macro prior are runtime hyperparameters. The current tuned defaults are embedded in both `Hyperparameters` and `main.py`.
 
@@ -364,28 +364,28 @@ $$
 
 Each candidate is a UID-keyed joint macro plan:
 
-$$
+```math
 \pi = \{(u_1, m_1), (u_2, m_2), \ldots, (u_n, m_n)\}
-$$
+```
 
 Its prior is the average of the participating robot macro priors:
 
-$$
+```math
 \tilde{P}(\pi) = \frac{1}{|\pi|} \sum_{(u,m) \in \pi} p_m
-$$
+```
 
 The deterministic baseline receives an additional multiplier:
 
-$$
+```math
 \tilde{P}_{\text{baseline}}(\pi) =
 \beta \cdot \tilde{P}(\pi)
-$$
+```
 
 All candidate priors are normalized before child creation:
 
-$$
+```math
 P_i = \frac{\max(0, \tilde{P}_i)}{\sum_j \max(0, \tilde{P}_j)}
-$$
+```
 
 This gives the tree a strong prior over strategic intent while still allowing rollouts to overturn that prior when sampled worlds disagree.
 
@@ -393,11 +393,11 @@ This gives the tree a strong prior over strategic intent while still allowing ro
 
 The deterministic policy uses BFS over active cells and jump cooldown state:
 
-$$
+```math
 v = (c, r, j)
-$$
+```
 
-where \(j\) is the remaining Factory jump cooldown or a sentinel value for robots that cannot jump. Movement edges decrement cooldown, while jump edges move two cells and reset cooldown to `FACTORY_JUMP_COOLDOWN`.
+where $`j`$ is the remaining Factory jump cooldown or a sentinel value for robots that cannot jump. Movement edges decrement cooldown, while jump edges move two cells and reset cooldown to `FACTORY_JUMP_COOLDOWN`.
 
 This is important because Factory jumps are often the difference between being trapped by walls and surviving the advancing southern boundary.
 
@@ -405,17 +405,17 @@ This is important because Factory jumps are often the difference between being t
 
 Terminal death states return exact win/loss values. If the game reaches a tiebreaker state, the evaluator uses a smooth energy-margin value:
 
-$$
+```math
 V_{\text{energy}} =
 \tanh \left( \frac{E_{\text{self}} - E_{\text{opp}}}{800} \right)
-$$
+```
 
 If terminal energy is tied, unit count is used:
 
-$$
+```math
 V_{\text{units}} =
 \tanh \left( \frac{U_{\text{self}} - U_{\text{opp}}}{4} \right)
-$$
+```
 
 For non-terminal rollout leaves, the evaluator blends energy, material, unit count, Factory progress, and scroll-margin features:
 
@@ -430,7 +430,7 @@ V(s) =\;&
 \end{aligned}
 ```
 
-where \(\Delta E\) is total energy margin, \(\Delta M\) is material margin, \(\Delta U\) is unit margin, \(\Delta R_f\) is best Factory row margin, and \(\Delta S_f\) is Factory distance-from-scroll-boundary margin.
+where $`\Delta E`$ is total energy margin, $`\Delta M`$ is material margin, $`\Delta U`$ is unit margin, $`\Delta R_f`$ is best Factory row margin, and $`\Delta S_f`$ is Factory distance-from-scroll-boundary margin.
 
 The formula gives MCTS a useful continuous gradient during mid-game while preserving the true endgame tiebreaker priorities.
 
@@ -516,7 +516,7 @@ flowchart TB
 
 The objective is:
 
-$$
+```math
 J(\theta) =
 \frac{1}{2S}
 \sum_{s=1}^{S}
@@ -525,9 +525,9 @@ J(\theta) =
 +
 \Delta E(\theta, s, \text{player}=1)
 \right]
-$$
+```
 
-where \(\Delta E\) is final candidate energy minus final opponent energy, read from each player's own final observation to avoid fog-of-war bias.
+where $`\Delta E`$ is final candidate energy minus final opponent energy, read from each player's own final observation to avoid fog-of-war bias.
 
 Key properties:
 
