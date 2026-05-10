@@ -300,7 +300,8 @@ struct MacroList {
     std::array<MacroAction, MAX_MACROS> macros{};
 };
 
-// Tunable search parameters. Defaults match the tuned Grandmaster baseline.
+// Tunable search parameters. Defaults use the best Optuna study results found
+// during tuning.
 struct Hyperparameters {
     // Exploration strength in PUCT child selection.
     float C_puct = 2.0884330868271443F;

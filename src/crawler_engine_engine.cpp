@@ -10,7 +10,7 @@ Hyperparameters::Hyperparameters() {
 }
 
 void Hyperparameters::reset_macro_priors() {
-    // Defaults reproduce the tuned Grandmaster baseline from params.txt.
+    // Macro priors use the best Optuna study results found during tuning.
     macro_prior.fill(0.20F);
     macro_prior[static_cast<size_t>(MACRO_IDLE)] = 0.49504719444108913F;
     macro_prior[static_cast<size_t>(MACRO_FACTORY_SUPPORT_WORKER)] = 1.0390992283842135F;
