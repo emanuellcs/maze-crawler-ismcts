@@ -346,7 +346,7 @@ Each MCTS iteration samples one concrete `BoardState` from these fields, copies 
 Child selection uses PUCT:
 
 ```math
-\operatorname{score}(s,a) =
+\text{score}(s,a) =
 Q(s,a) +
 C_{\text{puct}} P(s,a)
 \frac{\sqrt{N(s)+1}}{N(s,a)+1}
