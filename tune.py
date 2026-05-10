@@ -1,8 +1,15 @@
-"""Optuna tuning against the strong `opponent.py` benchmark.
+"""Optuna tuning against the strong ``opponent.py`` benchmark.
 
 Each trial samples C++ ISMCTS hyperparameters, injects them into a fresh
-`crawler_engine.Engine` wrapper, and evaluates the candidate against the
+``crawler_engine.Engine`` wrapper, and evaluates the candidate against the
 leaderboard-grade Python opponent on paired seeds with side swapping.
+
+Observation data passed through this module uses the Kaggle Maze Crawler shape:
+``walls`` is a flat active-window sequence of 400 wall bitfields or ``-1``;
+``robots`` maps UID strings to ``[type, col, row, energy, owner, move_cd,
+jump_cd, build_cd]``; ``crystals`` and ``miningNodes`` map ``"col,row"`` to
+scalar values; and ``mines`` maps ``"col,row"`` to
+``[energy, maxEnergy, owner]``.
 """
 
 from __future__ import annotations
@@ -69,7 +76,21 @@ DEFAULT_PARAMS = {
 
 @dataclass(frozen=True)
 class EvalConfig:
-    """Serializable match settings passed to process-pool workers."""
+    """Serializable match settings passed to process-pool workers.
+
+    Attributes
+    ----------
+    seeds:
+        Number of random seeds evaluated per trial before side swapping.
+    base_seed:
+        First environment seed in the paired evaluation window.
+    time_budget_ms:
+        Per-turn native ISMCTS budget for the candidate.
+    debug:
+        Whether Kaggle environments should run in debug mode.
+    fail_value:
+        Score assigned to candidate failure statuses.
+    """
 
     seeds: int
     base_seed: int
@@ -79,7 +100,17 @@ class EvalConfig:
 
 
 def _get(obj: Any, name: str, default: Any = None) -> Any:
-    """Read fields from either Kaggle objects or dict-like test stubs."""
+    """Read fields from Kaggle objects, dicts, or local test stubs.
+
+    Parameters
+    ----------
+    obj:
+        Observation or configuration object.
+    name:
+        Field name to read.
+    default:
+        Fallback value when the field is absent.
+    """
 
     if isinstance(obj, dict):
         return obj.get(name, default)
@@ -87,7 +118,17 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
 
 
 def _engine_seed(step: int, player: int, game_seed: int) -> int:
-    """Derive deterministic per-turn search seeds without sharing RNG state."""
+    """Derive deterministic per-turn search seeds without shared RNG state.
+
+    Parameters
+    ----------
+    step:
+        Public environment step.
+    player:
+        Player index controlled by the candidate engine.
+    game_seed:
+        Kaggle environment random seed.
+    """
 
     return ((step + 1) * 1_315_423_911 + player + game_seed * 2_654_435_761) & (
         (1 << 64) - 1
@@ -95,7 +136,13 @@ def _engine_seed(step: int, player: int, game_seed: int) -> int:
 
 
 def _load_crawler_engine() -> Any:
-    """Import crawler_engine, falling back to main.py's JIT compiler if needed."""
+    """Import ``crawler_engine``, falling back to ``main.py`` JIT compilation.
+
+    Returns
+    -------
+    Any
+        Imported pybind11 module exposing ``Engine``.
+    """
 
     try:
         return importlib.import_module("crawler_engine")
@@ -122,7 +169,13 @@ def _load_crawler_engine() -> Any:
 
 
 def _load_opponent_agent() -> Callable[[Any, Any], dict[str, str]]:
-    """Load opponent.py without mutating it or relying on package installation."""
+    """Load ``opponent.py`` without package installation side effects.
+
+    Returns
+    -------
+    Callable[[Any, Any], dict[str, str]]
+        Kaggle-compatible opponent callable.
+    """
 
     if not OPPONENT_PATH.exists():
         raise RuntimeError(f"opponent.py not found at {OPPONENT_PATH}")
@@ -140,7 +193,14 @@ def _load_opponent_agent() -> Callable[[Any, Any], dict[str, str]]:
 
 
 class CandidateAgent:
-    """Kaggle-compatible callable that owns fresh C++ engines for one match."""
+    """Kaggle-compatible callable that owns C++ engines for one match.
+
+    The callable receives Kaggle observations whose ``robots`` dictionary maps
+    UID to ``[type, col, row, energy, owner, move_cd, jump_cd, build_cd]`` and
+    forwards the same sparse resource dictionaries consumed by pybind.  One
+    native ``Engine`` is cached per player inside the match so Belief State
+    memory survives across turns.
+    """
 
     def __init__(
         self,
@@ -148,6 +208,18 @@ class CandidateAgent:
         time_budget_ms: int,
         game_seed: int,
     ):
+        """Initialize a candidate wrapper for one environment run.
+
+        Parameters
+        ----------
+        hyperparameters:
+            Native search parameters and macro priors to inject.
+        time_budget_ms:
+            Per-turn search budget passed to ``Engine.choose_actions``.
+        game_seed:
+            Environment seed folded into deterministic ISMCTS seeds.
+        """
+
         self.hyperparameters = hyperparameters
         self.time_budget_ms = time_budget_ms
         self.game_seed = game_seed
@@ -155,6 +227,18 @@ class CandidateAgent:
         self.engines: dict[int, Any] = {}
 
     def __call__(self, obs: Any, config: Any) -> dict[str, str]:
+        """Update the native engine for one turn and return action strings.
+
+        Parameters
+        ----------
+        obs:
+            Kaggle observation with wall, robot, crystal, mine, and mining-node
+            fields in the standard Maze Crawler shapes.
+        config:
+            Kaggle configuration object.  It is accepted for Kaggle
+            compatibility; rule constants are embedded in the native engine.
+        """
+
         player = int(_get(obs, "player", 0))
         engine = self.engines.get(player)
         if engine is None:
@@ -182,13 +266,29 @@ class CandidateAgent:
 def make_candidate_agent(
     hyperparameters: dict[str, float | int], time_budget_ms: int, game_seed: int
 ) -> Callable[[Any, Any], dict[str, str]]:
-    """Factory required by tuning workers to build a fresh C++ candidate agent."""
+    """Build a candidate callable for a process-pool match worker.
+
+    Parameters
+    ----------
+    hyperparameters:
+        Native search parameters and MacroAction priors.
+    time_budget_ms:
+        Per-turn ISMCTS budget in milliseconds.
+    game_seed:
+        Environment seed used for deterministic per-turn search seeds.
+    """
 
     return CandidateAgent(hyperparameters, time_budget_ms, game_seed)
 
 
 def make_opponent_agent() -> Callable[[Any, Any], dict[str, str]]:
-    """Factory for a fresh opponent wrapper per match."""
+    """Build a fresh opponent wrapper per match.
+
+    Returns
+    -------
+    Callable[[Any, Any], dict[str, str]]
+        Kaggle-compatible opponent callable.
+    """
 
     opponent_agent = _load_opponent_agent()
 
@@ -199,7 +299,14 @@ def make_opponent_agent() -> Callable[[Any, Any], dict[str, str]]:
 
 
 def suggest_hyperparameters(trial: optuna.trial.Trial) -> dict[str, float | int]:
-    """Sample the C++ hyperparameter surface exposed through pybind11."""
+    """Sample the native hyperparameter surface exposed through pybind11.
+
+    Parameters
+    ----------
+    trial:
+        Optuna trial used to sample PUCT, rollout horizon, and MacroAction
+        priors.
+    """
 
     params: dict[str, float | int] = {
         "C_puct": trial.suggest_float("C_puct", 0.5, 3.0),
@@ -232,7 +339,13 @@ def _final_own_energy(final_state: Any, owner: int) -> int:
 
 
 def _state_failed(final_state: Any) -> bool:
-    """Detect common Kaggle agent failure statuses without depending on enums."""
+    """Detect common Kaggle failure statuses without depending on enums.
+
+    Parameters
+    ----------
+    final_state:
+        Final Kaggle state object for one player.
+    """
 
     status = str(_get(final_state, "status", "")).upper()
     return any(token in status for token in ("ERROR", "INVALID", "TIMEOUT"))
@@ -241,7 +354,19 @@ def _state_failed(final_state: Any) -> bool:
 def run_match(
     params: dict[str, float | int], seed: int, candidate_player: int, config: EvalConfig
 ) -> float:
-    """Run one candidate-vs-opponent game and return candidate energy margin."""
+    """Run one candidate-vs-opponent game and return energy margin.
+
+    Parameters
+    ----------
+    params:
+        Hyperparameters applied to the candidate native engine.
+    seed:
+        Kaggle environment random seed.
+    candidate_player:
+        Player slot assigned to the candidate, either ``0`` or ``1``.
+    config:
+        Serializable evaluation settings.
+    """
 
     opponent_player = 1 - candidate_player
     agents: list[Callable[[Any, Any], dict[str, str]] | None] = [None, None]
@@ -263,7 +388,15 @@ def run_match(
 
 
 def evaluate_params(params: dict[str, float | int], config: EvalConfig) -> float:
-    """Average candidate margins across seeds and swapped player order."""
+    """Average candidate margins across seeds and swapped player order.
+
+    Parameters
+    ----------
+    params:
+        Hyperparameter candidate to evaluate.
+    config:
+        Evaluation settings shared by worker processes.
+    """
 
     try:
         margins: list[float] = []
@@ -279,12 +412,30 @@ def evaluate_params(params: dict[str, float | int], config: EvalConfig) -> float
 
 
 def objective(trial: optuna.trial.Trial, config: EvalConfig) -> float:
-    """Optuna objective: sample params and return average opponent energy margin."""
+    """Sample parameters and return average opponent energy margin.
+
+    Parameters
+    ----------
+    trial:
+        Optuna trial to sample.
+    config:
+        Evaluation settings for all matches in the objective.
+    """
 
     return evaluate_params(suggest_hyperparameters(trial), config)
 
 
 def _resolve_n_jobs(n_jobs: int, trials: int) -> int:
+    """Resolve requested worker count against trial count and CPU count.
+
+    Parameters
+    ----------
+    n_jobs:
+        Requested process count, with ``-1`` meaning all available CPUs.
+    trials:
+        Total number of Optuna trials.
+    """
+
     if n_jobs == -1:
         n_jobs = os.cpu_count() or 1
     if n_jobs <= 0:
@@ -293,7 +444,14 @@ def _resolve_n_jobs(n_jobs: int, trials: int) -> int:
 
 
 def optimize(args: argparse.Namespace) -> optuna.Study:
-    """Run process-parallel Optuna ask/tell optimization."""
+    """Run process-parallel Optuna ask/tell optimization.
+
+    Parameters
+    ----------
+    args:
+        Parsed CLI arguments controlling trial count, seeds, storage, and search
+        budget.
+    """
 
     config = EvalConfig(
         seeds=args.seeds,
@@ -329,6 +487,8 @@ def optimize(args: argparse.Namespace) -> optuna.Study:
     in_flight: dict[concurrent.futures.Future[float], optuna.trial.Trial] = {}
 
     def submit_next(pool: concurrent.futures.ProcessPoolExecutor) -> None:
+        """Submit one Optuna trial evaluation to the process pool."""
+
         nonlocal submitted
         trial = study.ask()
         params = suggest_hyperparameters(trial)
@@ -381,7 +541,13 @@ def optimize(args: argparse.Namespace) -> optuna.Study:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI settings and reject invalid self-play budgets early."""
+    """Parse CLI settings and reject invalid evaluation budgets early.
+
+    Returns
+    -------
+    argparse.Namespace
+        Validated command-line settings for the tuning run.
+    """
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=100)
@@ -406,6 +572,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the command-line tuning workflow."""
+
     args = parse_args()
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),

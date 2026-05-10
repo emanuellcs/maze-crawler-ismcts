@@ -1,7 +1,15 @@
 #include "crawler_engine_internal.hpp"
 
-// Fixed-buffer state containers and primitive action helpers. These routines are
-// deliberately small and allocation-free because they are used by every rollout.
+/**
+ * @file crawler_engine_state.cpp
+ * @brief Fixed-buffer state containers, Bitboards, and primitive action helpers.
+ *
+ * This module implements the low-level data structures copied and rebuilt by
+ * every ISMCTS Determinization and Rollout.  The functions are intentionally
+ * small, branch-light, and allocation-free: robot slots live in a Structure of
+ * Arrays, active tactical facts live in Bitboards, and action buffers are fixed
+ * arrays indexed by simulator-local robot slot.
+ */
 
 #include <algorithm>
 #include <bit>
@@ -10,12 +18,20 @@
 
 namespace crawler {
 
-// ---- Active-window bitboards ------------------------------------------------
-
+/**
+ * @brief Clear every active-window Bitboard word.
+ */
 void BitBoard::clear() {
     words.fill(0ULL);
 }
 
+/**
+ * @brief Set one active-window cell bit.
+ * @param active_index Index in the current 20x20 active window.
+ *
+ * Bounds checks make callers robust to stale absolute coordinates after scroll.
+ * The word/mask split converts cell membership into one OR instruction.
+ */
 void BitBoard::set(int active_index) {
     if (active_index < 0 || active_index >= ACTIVE_CELLS) {
         return;
@@ -23,6 +39,10 @@ void BitBoard::set(int active_index) {
     words[static_cast<size_t>(detail::active_word(active_index))] |= detail::active_mask(active_index);
 }
 
+/**
+ * @brief Clear one active-window cell bit.
+ * @param active_index Index in the current 20x20 active window.
+ */
 void BitBoard::reset(int active_index) {
     if (active_index < 0 || active_index >= ACTIVE_CELLS) {
         return;
@@ -30,6 +50,11 @@ void BitBoard::reset(int active_index) {
     words[static_cast<size_t>(detail::active_word(active_index))] &= ~detail::active_mask(active_index);
 }
 
+/**
+ * @brief Test one active-window cell bit.
+ * @param active_index Index in the current 20x20 active window.
+ * @return True when the cell is present in this Bitboard.
+ */
 bool BitBoard::test(int active_index) const {
     if (active_index < 0 || active_index >= ACTIVE_CELLS) {
         return false;
@@ -38,6 +63,10 @@ bool BitBoard::test(int active_index) const {
             detail::active_mask(active_index)) != 0;
 }
 
+/**
+ * @brief Test whether any tactical cell is marked.
+ * @return True when at least one 64-bit word is non-zero.
+ */
 bool BitBoard::any() const {
     for (uint64_t word : words) {
         if (word != 0ULL) {
@@ -47,14 +76,25 @@ bool BitBoard::any() const {
     return false;
 }
 
+/**
+ * @brief Pop the least significant set bit from a word.
+ * @param bits Word that must contain at least one set bit.
+ * @return Offset of the popped bit.
+ *
+ * `bits &= bits - 1` clears the lowest set bit in constant time.  This idiom
+ * supports fast iteration over Bitboards without scanning all 64 positions.
+ */
 int pop_lsb(uint64_t& bits) {
     const int offset = static_cast<int>(std::countr_zero(bits));
     bits &= bits - 1ULL;
     return offset;
 }
 
-// ---- Action names, parsing, and geometry -----------------------------------
-
+/**
+ * @brief Convert a primitive action enum into the Kaggle action string.
+ * @param action Primitive action value.
+ * @return Stable string literal.
+ */
 const char* action_name(Action action) {
     switch (action) {
         case ACT_NORTH: return "NORTH";
@@ -86,6 +126,11 @@ const char* action_name(Action action) {
     }
 }
 
+/**
+ * @brief Convert a macro action enum into a hyperparameter/debug string.
+ * @param macro Macro intent value.
+ * @return Stable string literal without a `MACRO_` prefix.
+ */
 const char* macro_action_name(MacroAction macro) {
     switch (macro) {
         case MACRO_FACTORY_SUPPORT_WORKER: return "FACTORY_SUPPORT_WORKER";
@@ -107,6 +152,11 @@ const char* macro_action_name(MacroAction macro) {
     }
 }
 
+/**
+ * @brief Parse a Kaggle action string into the simulator enum.
+ * @param value Action string from Python.
+ * @return Matching Action, or `ACT_IDLE` for unknown values.
+ */
 Action parse_action(std::string_view value) {
     if (value == "NORTH") return ACT_NORTH;
     if (value == "SOUTH") return ACT_SOUTH;
@@ -135,6 +185,11 @@ Action parse_action(std::string_view value) {
     return ACT_IDLE;
 }
 
+/**
+ * @brief Extract the direction encoded by a primitive action.
+ * @param action Movement, jump, wall edit, transfer, or idle action.
+ * @return Direction associated with the action, or `DIR_NONE`.
+ */
 Direction action_direction(Action action) {
     switch (action) {
         case ACT_NORTH:
@@ -166,6 +221,11 @@ Direction action_direction(Action action) {
     }
 }
 
+/**
+ * @brief Map a direction to its cell wall bit.
+ * @param direction Direction to encode.
+ * @return Wall bit mask, or zero for `DIR_NONE`.
+ */
 uint8_t direction_wall_bit(Direction direction) {
     switch (direction) {
         case DIR_NORTH: return WALL_N;
@@ -176,6 +236,11 @@ uint8_t direction_wall_bit(Direction direction) {
     }
 }
 
+/**
+ * @brief Return the opposite direction used for reciprocal wall writes.
+ * @param direction Direction to invert.
+ * @return Opposite direction, or `DIR_NONE`.
+ */
 Direction opposite_direction(Direction direction) {
     switch (direction) {
         case DIR_NORTH: return DIR_SOUTH;
@@ -186,18 +251,33 @@ Direction opposite_direction(Direction direction) {
     }
 }
 
+/**
+ * @brief Return the column delta for a one-cell step.
+ * @param direction Direction to move.
+ * @return `+1`, `-1`, or `0`.
+ */
 int direction_dc(Direction direction) {
     if (direction == DIR_EAST) return 1;
     if (direction == DIR_WEST) return -1;
     return 0;
 }
 
+/**
+ * @brief Return the row delta for a one-cell step.
+ * @param direction Direction to move.
+ * @return `+1`, `-1`, or `0`.
+ */
 int direction_dr(Direction direction) {
     if (direction == DIR_NORTH) return 1;
     if (direction == DIR_SOUTH) return -1;
     return 0;
 }
 
+/**
+ * @brief Return the rule-defined movement period for a robot type.
+ * @param type RobotType value.
+ * @return Cooldown applied after successful movement.
+ */
 int move_period(uint8_t type) {
     switch (type) {
         case FACTORY: return FACTORY_MOVE_PERIOD;
@@ -208,6 +288,11 @@ int move_period(uint8_t type) {
     }
 }
 
+/**
+ * @brief Return the rule-defined energy cap for a robot type.
+ * @param type RobotType value.
+ * @return Maximum carry energy; factories use a large integer sentinel.
+ */
 int max_energy(uint8_t type) {
     switch (type) {
         case SCOUT: return SCOUT_MAX_ENERGY;
@@ -218,6 +303,11 @@ int max_energy(uint8_t type) {
     }
 }
 
+/**
+ * @brief Return the Manhattan vision radius for a robot type.
+ * @param type RobotType value.
+ * @return Vision radius in cells.
+ */
 int vision_range(uint8_t type) {
     switch (type) {
         case FACTORY: return VISION_FACTORY;
@@ -228,6 +318,12 @@ int vision_range(uint8_t type) {
     }
 }
 
+/**
+ * @brief Test whether a wall edit targets an immutable perimeter or mirror wall.
+ * @param col Source column.
+ * @param direction Wall direction from the source cell.
+ * @return True when the rulebook forbids changing that wall.
+ */
 bool is_fixed_wall(int col, Direction direction) {
     const int half = WIDTH / 2;
     if (direction == DIR_WEST && col == 0) {
@@ -245,8 +341,9 @@ bool is_fixed_wall(int col, Direction direction) {
     return false;
 }
 
-// ---- Robot store ------------------------------------------------------------
-
+/**
+ * @brief Clear every robot slot and reset the slot high-water mark.
+ */
 void RobotStore::clear() {
     for (auto& u : uid) {
         u.fill('\0');
@@ -263,6 +360,14 @@ void RobotStore::clear() {
     used = 0;
 }
 
+/**
+ * @brief Locate a live robot by UID.
+ * @param value External UID string.
+ * @return Simulator-local slot index, or `-1` when absent.
+ *
+ * MCTS stores UID-keyed macro plans so child edges remain meaningful across
+ * Determinizations where local robot slot numbers may differ.
+ */
 int RobotStore::find_uid(std::string_view value) const {
     for (int i = 0; i < used; ++i) {
         if (alive[static_cast<size_t>(i)] != 0 && detail::uid_equal(uid[static_cast<size_t>(i)], value)) {
@@ -272,6 +377,19 @@ int RobotStore::find_uid(std::string_view value) const {
     return -1;
 }
 
+/**
+ * @brief Add or recycle a robot slot with explicit state.
+ * @param uid_value External UID string.
+ * @param robot_type RobotType value.
+ * @param robot_owner Owner player index.
+ * @param robot_col Absolute column.
+ * @param robot_row Absolute row.
+ * @param robot_energy Current energy.
+ * @param move_cooldown Remaining move cooldown.
+ * @param jump_cooldown Remaining jump cooldown.
+ * @param build_cooldown Remaining build cooldown.
+ * @return Slot index, or `-1` if capacity is exhausted.
+ */
 int RobotStore::add_robot(std::string_view uid_value, uint8_t robot_type, uint8_t robot_owner,
                           int robot_col, int robot_row, int robot_energy,
                           int move_cooldown, int jump_cooldown, int build_cooldown) {
@@ -302,6 +420,16 @@ int RobotStore::add_robot(std::string_view uid_value, uint8_t robot_type, uint8_
     return slot;
 }
 
+/**
+ * @brief Add a simulator-generated robot with a deterministic synthetic UID.
+ * @param serial Monotonic BoardState serial.
+ * @param robot_type RobotType value.
+ * @param robot_owner Owner player index.
+ * @param robot_col Absolute column.
+ * @param robot_row Absolute row.
+ * @param robot_energy Spawn energy.
+ * @return Slot index, or `-1` if capacity is exhausted.
+ */
 int RobotStore::add_generated_robot(uint32_t serial, uint8_t robot_type, uint8_t robot_owner,
                                     int robot_col, int robot_row, int robot_energy) {
     std::array<char, UID_LEN> generated{};
@@ -310,6 +438,10 @@ int RobotStore::add_generated_robot(uint32_t serial, uint8_t robot_type, uint8_t
                      move_period(robot_type), 0, 0);
 }
 
+/**
+ * @brief Mark a robot slot dead while preserving slot array capacity.
+ * @param index Simulator-local robot slot.
+ */
 void RobotStore::remove(int index) {
     if (index < 0 || index >= used) {
         return;
@@ -317,8 +449,9 @@ void RobotStore::remove(int index) {
     alive[static_cast<size_t>(index)] = 0;
 }
 
-// ---- Board state and derived tactical masks --------------------------------
-
+/**
+ * @brief Reset the complete concrete BoardState.
+ */
 void BoardState::reset() {
     player = 0;
     step = 0;
@@ -348,6 +481,12 @@ void BoardState::reset() {
     nodes_active.clear();
 }
 
+/**
+ * @brief Convert absolute coordinates to an absolute cell index.
+ * @param c Column.
+ * @param r Absolute row.
+ * @return `row * WIDTH + col`, or `-1` when out of absolute storage bounds.
+ */
 int BoardState::abs_index(int c, int r) const {
     if (c < 0 || c >= WIDTH || r < 0 || r >= MAX_ROWS) {
         return -1;
@@ -355,6 +494,12 @@ int BoardState::abs_index(int c, int r) const {
     return r * WIDTH + c;
 }
 
+/**
+ * @brief Convert absolute coordinates to an active-window index.
+ * @param c Column.
+ * @param r Absolute row.
+ * @return Active-window index, or `-1` when outside the visible tactical window.
+ */
 int BoardState::active_index(int c, int r) const {
     if (!in_active(c, r)) {
         return -1;
@@ -362,10 +507,22 @@ int BoardState::active_index(int c, int r) const {
     return (r - south_bound) * WIDTH + c;
 }
 
+/**
+ * @brief Test whether a coordinate belongs to the current active window.
+ * @param c Column.
+ * @param r Absolute row.
+ * @return True when Bitboards can represent the cell.
+ */
 bool BoardState::in_active(int c, int r) const {
     return c >= 0 && c < WIDTH && r >= south_bound && r <= north_bound && r < MAX_ROWS;
 }
 
+/**
+ * @brief Read a cell's wall bitfield, treating out-of-bounds as fully blocked.
+ * @param c Column.
+ * @param r Absolute row.
+ * @return Wall bitfield.
+ */
 uint8_t BoardState::wall_at(int c, int r) const {
     const int idx = abs_index(c, r);
     if (idx < 0) {
@@ -374,6 +531,17 @@ uint8_t BoardState::wall_at(int c, int r) const {
     return walls[static_cast<size_t>(idx)];
 }
 
+/**
+ * @brief Test whether a one-cell move is geometrically passable.
+ * @param c Source column.
+ * @param r Source absolute row.
+ * @param direction Direction of travel.
+ * @return True when the source wall bit is clear and destination is in absolute bounds.
+ *
+ * The simulator intentionally checks the source directional bit only.  Wall edit
+ * helpers maintain reciprocal bits so this remains an O(1) collision test in
+ * Rollouts instead of a two-cell consistency check.
+ */
 bool BoardState::can_move_through(int c, int r, Direction direction) const {
     const int idx = abs_index(c, r);
     if (idx < 0 || direction == DIR_NONE) {
@@ -387,6 +555,13 @@ bool BoardState::can_move_through(int c, int r, Direction direction) const {
     return nc >= 0 && nc < WIDTH && nr >= 0 && nr < MAX_ROWS;
 }
 
+/**
+ * @brief Recompute all active-window Bitboards from the absolute board arrays.
+ *
+ * Rebuilding masks after each simulator step is cheaper and safer than trying
+ * to incrementally maintain every derived tactical feature across combat,
+ * scrolling, resource collection, and Determinization.
+ */
 void BoardState::rebuild_active_bitboards() {
     own_occupancy.clear();
     enemy_occupancy.clear();
@@ -444,12 +619,16 @@ void BoardState::rebuild_active_bitboards() {
     }
 }
 
-// ---- Action buffers ---------------------------------------------------------
-
+/**
+ * @brief Reset all primitive actions to idle.
+ */
 void PrimitiveActions::clear() {
     actions.fill(ACT_IDLE);
 }
 
+/**
+ * @brief Clear the fixed-buffer action result.
+ */
 void ActionResult::clear() {
     count = 0;
     for (auto& u : uid) {
@@ -458,6 +637,11 @@ void ActionResult::clear() {
     action.fill(ACT_IDLE);
 }
 
+/**
+ * @brief Append one UID/action pair for Python serialization.
+ * @param uid_value Stable robot UID.
+ * @param primitive Primitive action selected for that robot.
+ */
 void ActionResult::add(std::string_view uid_value, Action primitive) {
     if (count >= MAX_ROBOTS) {
         return;

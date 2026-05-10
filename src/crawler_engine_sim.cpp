@@ -1,7 +1,15 @@
 #include "crawler_engine_internal.hpp"
 
-// Exact deterministic game mechanics. This module owns the phase-ordered `step`
-// implementation and avoids heap allocation in the hot simulation path.
+/**
+ * @file crawler_engine_sim.cpp
+ * @brief Exact deterministic Maze Crawler rule engine used by ISMCTS Rollouts.
+ *
+ * CrawlerSim::step() is the mission-critical hot path: every ISMCTS iteration
+ * repeatedly advances sampled Determinizations through the same phase order as
+ * the Kaggle environment.  All scratch state is fixed-size `std::array` storage,
+ * which preserves zero-allocation Rollouts and makes behavior reproducible under
+ * strict per-turn time budgets.
+ */
 
 #include <algorithm>
 #include <array>
@@ -11,9 +19,16 @@
 namespace crawler {
 namespace {
 
+/**
+ * @brief Compute rewards, terminal flags, and the winner from the concrete state.
+ * @param state BoardState to inspect and mutate.
+ *
+ * Mid-game reward mirrors the environment's total-energy signal.  Terminal
+ * states switch to the rulebook cascade: surviving Factory, then energy, then
+ * unit count, then draw.  The search evaluator in `crawler_engine_mcts.cpp`
+ * mirrors the same priorities with smooth non-terminal shaping.
+ */
 void compute_rewards(BoardState& state) {
-    // Mid-game rewards mirror the environment's energy signal. Terminal states
-    // switch to the rulebook tiebreaker cascade: factory survival, energy, units.
     int factory_count[2] = {0, 0};
     int64_t energy[2] = {0, 0};
     int units[2] = {0, 0};
@@ -79,9 +94,17 @@ void compute_rewards(BoardState& state) {
     }
 }
 
+/**
+ * @brief Return remaining energy capacity for a robot.
+ * @param state Concrete board state.
+ * @param robot_index Simulator-local robot slot.
+ * @return Non-negative amount of energy the robot can still receive.
+ *
+ * Factories have no gameplay cap, so the implementation uses the remaining
+ * `int32_t` range as a practical storage guard.  Other robots use rule-defined
+ * caps, which makes transfer and crystal collection deterministic.
+ */
 int energy_space_for_robot(const BoardState& state, int robot_index) {
-    // Factories have no game cap, but storage still uses int32_t. Non-factory
-    // robots use their rule-defined max energy.
     const int energy = state.robots.energy[static_cast<size_t>(robot_index)];
     if (state.robots.type[static_cast<size_t>(robot_index)] == FACTORY) {
         return std::max(0, std::numeric_limits<int32_t>::max() - energy);
@@ -91,13 +114,23 @@ int energy_space_for_robot(const BoardState& state, int robot_index) {
 
 }  // namespace
 
+/**
+ * @brief Reset the deterministic simulator.
+ */
 void CrawlerSim::reset() {
     state.reset();
 }
 
+/**
+ * @brief Rebuild concrete simulator state from an observation plus belief memory.
+ * @param obs Latest fixed-buffer observation.
+ * @param belief Player-centric remembered facts.
+ *
+ * The observation provides exact live robots and visible walls; belief supplies
+ * remembered walls, mines, and nodes.  The function preserves the generated UID
+ * serial so simulated spawn UIDs remain deterministic across observation reloads.
+ */
 void CrawlerSim::load_from_observation(const ObservationInput& obs, const BeliefState& belief) {
-    // Rebuild the concrete snapshot from public observation plus remembered
-    // belief facts. Generated UID serials are preserved across observations.
     const int prior_step = state.step;
     const uint32_t prior_uid = state.next_generated_uid;
     state.reset();
@@ -140,6 +173,15 @@ void CrawlerSim::load_from_observation(const ObservationInput& obs, const Belief
     state.rebuild_active_bitboards();
 }
 
+/**
+ * @brief Advance the game state by one rule-faithful turn.
+ * @param input_actions Primitive actions keyed by simulator-local robot slot.
+ *
+ * The implementation follows the environment phase order exactly.  Scratch
+ * arrays encode pending destruction, movement targets, same-cell participants,
+ * and combat results without dynamic allocation, because this routine dominates
+ * ISMCTS Rollout cost.
+ */
 void CrawlerSim::step(const PrimitiveActions& input_actions) {
     if (state.done) {
         return;
@@ -165,7 +207,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
     stationary_next.fill(-1);
     mover_next.fill(-1);
 
-    // Phase 1: cooldown tick.
+    /* Phase 1: cooldown tick.  Cooldowns decrease before legality checks, matching the public rules. */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;
@@ -181,7 +223,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 2: action type validation. Resource and wall legality is checked in the owning phase.
+    /*
+     * Phase 2: action-family validation.  Resource, cooldown, wall, and target
+     * legality are deferred to the owning phase so illegal actions fail in the
+     * same order as the environment.
+     */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;
@@ -200,7 +246,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 3: per-turn energy drain; robots reaching zero cannot act this turn.
+    /* Phase 3: per-turn energy drain.  A robot drained to zero becomes idle immediately. */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;
@@ -212,7 +258,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 4a: miner transform, before any movement or combat.
+    /* Phase 4a: Miner transform resolves before wall edits, builds, transfers, movement, and combat. */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0 || actions[static_cast<size_t>(i)] != ACT_TRANSFORM) {
             continue;
@@ -233,7 +279,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         destroyed[static_cast<size_t>(i)] = 1;
     }
 
-    // Phase 4b: worker wall edits. Fixed-wall no-ops still consume energy by rule.
+    /* Phase 4b: Worker wall edits.  Fixed-wall no-ops still consume energy by rule. */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0 || destroyed[static_cast<size_t>(i)] != 0) {
             continue;
@@ -258,7 +304,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 4c: factory builds. Spawned units are stationary combat participants this same turn.
+    /*
+     * Phase 4c: Factory builds.  Spawned units enter the board before movement,
+     * so the combat resolver must count them as stationary participants on the
+     * spawn cell during this same turn.
+     */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0 || destroyed[static_cast<size_t>(i)] != 0) {
             continue;
@@ -298,7 +348,10 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 4d: transfers happen before movement. Overflow is discarded because the source sends all energy.
+    /*
+     * Phase 4d: energy transfers.  Transfers happen before movement and drain
+     * the source; any amount beyond the target's cap is discarded by rule.
+     */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0 || destroyed[static_cast<size_t>(i)] != 0) {
             continue;
@@ -343,7 +396,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 5a: collect simultaneous movement intentions without applying positions.
+    /*
+     * Phase 5a: collect simultaneous movement intentions without moving pieces.
+     * Target arrays let the combat phase reason over all destinations at once,
+     * which is required for crush combat and same-type annihilation.
+     */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;
@@ -426,7 +483,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 5b: resolve same-cell crush combat from the planned destinations.
+    /*
+     * Phase 5b: resolve same-cell crush combat from planned destinations.
+     * Counting robot types per cell implements the rulebook hierarchy in O(k)
+     * for cell participants, while the fixed linked lists avoid per-cell vectors.
+     */
     for (int r = state.south_bound; r <= state.north_bound; ++r) {
         for (int c = 0; c < WIDTH; ++c) {
             const int idx = state.abs_index(c, r);
@@ -516,7 +577,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phase 6: crystals disappear on combat cells without survivors, otherwise the survivor collects.
+    /*
+     * Phase 6: crystal cleanup and collection.  Combat consumes crystals on
+     * empty aftermath cells; otherwise the surviving occupant collects up to its
+     * remaining energy capacity.
+     */
     for (int idx = 0; idx < MAX_CELLS; ++idx) {
         if (combat_cell[static_cast<size_t>(idx)] == 0 || state.crystal_energy[static_cast<size_t>(idx)] <= 0) {
             continue;
@@ -550,7 +615,7 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phases 7-8: mine pickup happens before mine generation.
+    /* Phases 7-8: friendly mine pickup happens before each mine generates new energy. */
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;
@@ -577,7 +642,11 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
         }
     }
 
-    // Phases 9-10: scroll and destroy everything below the new south bound.
+    /*
+     * Phases 9-10: scroll the active window and destroy everything below the
+     * new south bound.  A generated north row is a concrete rollout hypothesis
+     * and can later be overwritten by observation-derived belief.
+     */
     --state.scroll_counter;
     if (state.scroll_counter <= 0) {
         ++state.south_bound;

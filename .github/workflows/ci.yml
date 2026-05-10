@@ -1,6 +1,14 @@
+# CI/CD for the Maze Crawler fixed-buffer ISMCTS engine.
+#
+# The workflow validates both deployment modes:
+# - CMake builds the native pybind11 extension for local/CI use.
+# - The packaged source bundle is exercised through `main.py` so Kaggle-style
+#   JIT compilation remains healthy.
 name: CI/CD
 
 on:
+  # Pull requests and mainline pushes must keep the simulator, pybind bridge,
+  # ISMCTS search, and packaging path regression-clean.
   pull_request:
   push:
     branches:
@@ -11,13 +19,17 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # Cancel stale runs on the same ref so expensive native builds do not pile up.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
+  # Default jobs only need read access; tag releases elevate permissions below.
   contents: read
 
 env:
+  # Release mode enables the same `-O3 -march=native -ffast-math -DNDEBUG`
+  # settings documented in CMakeLists.txt.
   CMAKE_BUILD_TYPE: Release
 
 jobs:
@@ -26,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      # Test both supported Python ABIs even when one matrix leg fails.
       fail-fast: false
       matrix:
         python-version:
@@ -45,11 +58,15 @@ jobs:
 
       - name: Install Python dependencies
         run: |
+          # pybind11 is needed for CMake discovery; pytest/numpy exercise the
+          # bridge and deterministic simulator fixtures.
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
       - name: Configure CMake
         run: |
+          # Bind CMake to the matrix Python interpreter so the extension ABI
+          # matches the subsequent smoke and pytest commands.
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
             -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
@@ -65,6 +82,8 @@ jobs:
 
       - name: Verify Kaggle entrypoint imports
         run: |
+          # This smoke call proves `main.agent` can load the native module from
+          # PYTHONPATH=build and emit a Kaggle-compatible action dictionary.
           PYTHONPATH=build python - <<'PY'
           from types import SimpleNamespace
           from main import agent
@@ -89,6 +108,8 @@ jobs:
       - name: Upload compiled extension artifact
         uses: actions/upload-artifact@v4
         with:
+          # Retain the compiled extension and compile database for debugging
+          # native search or simulator regressions from CI artifacts.
           name: crawler-engine-ubuntu-py${{ matrix.python-version }}
           path: |
             build/crawler_engine*.so
@@ -107,6 +128,8 @@ jobs:
 
       - name: Create source package
         run: |
+          # Source artifact excludes transient build/test directories and VCS
+          # metadata while preserving the documented repository layout.
           mkdir -p dist
           tar \
             --exclude='.git' \
@@ -134,6 +157,8 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
 
     permissions:
+      # Tag builds publish a GitHub release bundle, so write access is scoped to
+      # this job only.
       contents: write
 
     steps:
@@ -160,6 +185,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # Create the release lazily and update the bundled artifact in-place so
+          # reruns of the same tag remain idempotent.
           if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \

@@ -1,5 +1,14 @@
+# pybind11 provides the Python/C++ binding layer for the native ISMCTS engine.
 pybind11>=2.13
+
+# numpy is used by regression fixtures to build compact wall arrays.
 numpy>=2.0
+
+# pytest runs simulator, pybind, MCTS, and packaging regressions.
 pytest>=8.0
+
+# kaggle-environments supplies the local Maze Crawler environment for tuning and smoke tests.
 kaggle-environments>=1.29.0
+
+# optuna drives MacroAction prior, PUCT, and rollout-depth tuning.
 optuna>=3.6

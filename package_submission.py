@@ -1,4 +1,10 @@
-"""Create a Kaggle submission bundle with sources and pybind11 headers."""
+"""Create the Kaggle source bundle for the Maze Crawler ISMCTS engine.
+
+The bundle contains ``main.py``, every C++ source/header needed by the
+fixed-buffer engine, and vendored pybind11 headers.  Kaggle can then JIT-compile
+the same native simulator, Belief State, Bitboard, Rollout, and ISMCTS code
+without relying on a prebuilt platform-specific extension.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,18 @@ OUT = ROOT / "submission.tar.gz"
 
 
 def _pybind11_include_dir() -> Path:
-    """Find installed pybind11 headers to vendor into the source bundle."""
+    """Find installed pybind11 headers to vendor into the source bundle.
+
+    Returns
+    -------
+    pathlib.Path
+        Include directory containing ``pybind11/pybind11.h``.
+
+    Raises
+    ------
+    RuntimeError
+        If pybind11 is unavailable or the header layout is unexpected.
+    """
 
     try:
         import pybind11
@@ -26,13 +43,29 @@ def _pybind11_include_dir() -> Path:
 
 
 def _add_file(tar: tarfile.TarFile, path: Path, arcname: Path) -> None:
-    """Add one file with a stable archive name and no recursive surprises."""
+    """Add one file with a stable archive name and no recursive traversal.
+
+    Parameters
+    ----------
+    tar:
+        Open output archive.
+    path:
+        Source file on disk.
+    arcname:
+        Archive-relative path used by Kaggle after extraction.
+    """
 
     tar.add(path, arcname=str(arcname), recursive=False)
 
 
 def build_package() -> Path:
-    """Create submission.tar.gz with main.py, engine sources, and pybind11."""
+    """Create ``submission.tar.gz`` with the entrypoint, engine, and pybind11.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the generated archive.
+    """
 
     pybind_include = _pybind11_include_dir()
     with tarfile.open(OUT, "w:gz") as tar:

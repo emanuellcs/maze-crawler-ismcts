@@ -1,8 +1,14 @@
 #include "crawler_engine_internal.hpp"
 
-// Deterministic fallback policy and macro-action translation. The factory,
-// worker, and scout branches mirror opponent.py, but all scratch state stays in
-// fixed arrays.
+/**
+ * @file crawler_engine_policy.cpp
+ * @brief Deterministic rollout policy, Bitboard pathfinding, and MacroAction translation.
+ *
+ * This module supplies the baseline plan used outside search, the rollout policy
+ * used inside ISMCTS, and the macro-to-primitive translator used by tree edges.
+ * It mirrors the strategic shape of `opponent.py` while keeping every scratch
+ * structure in fixed arrays so Rollouts stay allocation-free.
+ */
 
 #include <algorithm>
 #include <array>
@@ -19,6 +25,9 @@ constexpr int NO_JUMP_PATH_CD = 999;
 
 constexpr std::array<Direction, 4> POLICY_DIRS{DIR_NORTH, DIR_EAST, DIR_WEST, DIR_SOUTH};
 
+/**
+ * @brief Queue entry for cooldown-aware active-window BFS.
+ */
 struct BFSNode {
     int16_t col = 0;
     int16_t row = 0;
@@ -27,6 +36,11 @@ struct BFSNode {
     Action first = ACT_IDLE;
 };
 
+/**
+ * @brief Convert a direction into a one-cell movement primitive.
+ * @param direction Direction to encode.
+ * @return Movement action or `ACT_IDLE`.
+ */
 Action movement_action(Direction direction) {
     switch (direction) {
         case DIR_NORTH: return ACT_NORTH;
@@ -37,6 +51,11 @@ Action movement_action(Direction direction) {
     }
 }
 
+/**
+ * @brief Convert a direction into a Factory jump primitive.
+ * @param direction Direction to encode.
+ * @return Jump action or `ACT_IDLE`.
+ */
 Action jump_action(Direction direction) {
     switch (direction) {
         case DIR_NORTH: return ACT_JUMP_NORTH;
@@ -47,6 +66,11 @@ Action jump_action(Direction direction) {
     }
 }
 
+/**
+ * @brief Convert a direction into an energy-transfer primitive.
+ * @param direction Direction to encode.
+ * @return Transfer action or `ACT_IDLE`.
+ */
 Action transfer_action(Direction direction) {
     switch (direction) {
         case DIR_NORTH: return ACT_TRANSFER_NORTH;
@@ -57,18 +81,41 @@ Action transfer_action(Direction direction) {
     }
 }
 
+/**
+ * @brief Test whether a robot can pay a cost after the mandatory turn drain.
+ * @param energy Current robot energy.
+ * @param cost Action cost.
+ * @return True when energy covers `ENERGY_PER_TURN + cost`.
+ */
 bool can_pay_after_drain(int energy, int cost) {
     return energy >= cost + ENERGY_PER_TURN;
 }
 
+/**
+ * @brief Test whether an action is a one-cell movement primitive.
+ * @param action Primitive action.
+ * @return True for cardinal movement actions.
+ */
 bool is_move_action(Action action) {
     return action >= ACT_NORTH && action <= ACT_WEST;
 }
 
+/**
+ * @brief Test whether an action is a Factory jump primitive.
+ * @param action Primitive action.
+ * @return True for cardinal jump actions.
+ */
 bool is_jump_action(Action action) {
     return action >= ACT_JUMP_NORTH && action <= ACT_JUMP_WEST;
 }
 
+/**
+ * @brief Compare robot UIDs lexicographically with slot index as a tie-break.
+ * @param robots Robot store.
+ * @param lhs Left slot.
+ * @param rhs Right slot.
+ * @return True when `lhs` should act before `rhs`.
+ */
 bool uid_less(const RobotStore& robots, int lhs, int rhs) {
     for (int i = 0; i < UID_LEN; ++i) {
         const unsigned char a = static_cast<unsigned char>(robots.uid[static_cast<size_t>(lhs)][static_cast<size_t>(i)]);
@@ -80,6 +127,13 @@ bool uid_less(const RobotStore& robots, int lhs, int rhs) {
     return lhs < rhs;
 }
 
+/**
+ * @brief Insert a robot slot into a UID-sorted fixed array.
+ * @param robots Robot store for UID comparisons.
+ * @param indices Destination slot array.
+ * @param count Mutable count of valid entries.
+ * @param robot_index Slot to insert.
+ */
 void insert_uid_sorted(const RobotStore& robots, std::array<int, MAX_ROBOTS>& indices, int& count, int robot_index) {
     if (count >= MAX_ROBOTS) {
         return;
@@ -93,6 +147,12 @@ void insert_uid_sorted(const RobotStore& robots, std::array<int, MAX_ROBOTS>& in
     ++count;
 }
 
+/**
+ * @brief Return the deterministic primary Factory for an owner.
+ * @param state Concrete board state.
+ * @param owner Player index.
+ * @return Slot of the UID-earliest live Factory, or `-1`.
+ */
 int primary_factory_for_owner(const BoardState& state, int owner) {
     int best = -1;
     for (int i = 0; i < state.robots.used; ++i) {
@@ -108,6 +168,14 @@ int primary_factory_for_owner(const BoardState& state, int owner) {
     return best;
 }
 
+/**
+ * @brief Test whether a friendly live robot occupies a coordinate.
+ * @param state Concrete board state.
+ * @param owner Player index.
+ * @param c Column.
+ * @param r Absolute row.
+ * @return True when a friendly robot is on the cell.
+ */
 bool friendly_cell_occupied(const BoardState& state, int owner, int c, int r) {
     for (int i = 0; i < state.robots.used; ++i) {
         if (state.robots.alive[static_cast<size_t>(i)] != 0 &&
@@ -120,6 +188,13 @@ bool friendly_cell_occupied(const BoardState& state, int owner, int c, int r) {
     return false;
 }
 
+/**
+ * @brief Mark a coordinate in an active-window Bitboard when representable.
+ * @param state Concrete board state.
+ * @param mask Bitboard to mutate.
+ * @param c Column.
+ * @param r Absolute row.
+ */
 void mark_cell(const BoardState& state, BitBoard& mask, int c, int r) {
     const int active = state.active_index(c, r);
     if (active >= 0) {
@@ -127,18 +202,40 @@ void mark_cell(const BoardState& state, BitBoard& mask, int c, int r) {
     }
 }
 
+/**
+ * @brief Bitwise-OR one Bitboard into another.
+ * @param dst Destination mask.
+ * @param src Source mask.
+ *
+ * Whole-word OR combines reservations and enemy occupancy in a handful of
+ * machine operations instead of scanning all active cells.
+ */
 void merge_mask(BitBoard& dst, const BitBoard& src) {
     for (int i = 0; i < ACTIVE_WORDS; ++i) {
         dst.words[static_cast<size_t>(i)] |= src.words[static_cast<size_t>(i)];
     }
 }
 
+/**
+ * @brief Return the union of two active-window Bitboards.
+ * @param a First mask.
+ * @param b Second mask.
+ * @return Combined mask.
+ */
 BitBoard merged_mask(const BitBoard& a, const BitBoard& b) {
     BitBoard out = a;
     merge_mask(out, b);
     return out;
 }
 
+/**
+ * @brief Reserve the cell reached by a planned movement or jump.
+ * @param state Concrete board state.
+ * @param reserved Reservation Bitboard.
+ * @param c Source column.
+ * @param r Source row.
+ * @param action Planned primitive action.
+ */
 void reserve_destination(const BoardState& state, BitBoard& reserved, int c, int r, Action action) {
     Direction direction = action_direction(action);
     int dc = 0;
@@ -156,17 +253,31 @@ void reserve_destination(const BoardState& state, BitBoard& reserved, int c, int
     mark_cell(state, reserved, c + dc, r + dr);
 }
 
+/**
+ * @brief Mirror east/west wall bits around the maze centerline.
+ * @param wall Source wall bitfield.
+ * @return Mirrored wall bitfield.
+ */
 uint8_t mirror_wall(uint8_t wall) {
     uint8_t out = wall & static_cast<uint8_t>(WALL_N | WALL_S);
     if ((wall & WALL_E) != 0) {
+        /* East on one half is west after horizontal symmetry. */
         out |= WALL_W;
     }
     if ((wall & WALL_W) != 0) {
+        /* West on one half is east after horizontal symmetry. */
         out |= WALL_E;
     }
     return out;
 }
 
+/**
+ * @brief Read a wall bitfield for policy planning with symmetry fallback.
+ * @param state Concrete board state.
+ * @param c Column.
+ * @param r Absolute row.
+ * @return Known or mirrored wall bitfield, or zero when neither side is known.
+ */
 uint8_t policy_wall_at(const BoardState& state, int c, int r) {
     if (state.in_active(c, r)) {
         const int idx = state.abs_index(c, r);
@@ -185,6 +296,14 @@ uint8_t policy_wall_at(const BoardState& state, int c, int r) {
     return 0;
 }
 
+/**
+ * @brief Test one-cell passability under policy-visible or mirrored walls.
+ * @param state Concrete board state.
+ * @param c Source column.
+ * @param r Source row.
+ * @param direction Direction of travel.
+ * @return True when the active destination is in bounds and no wall blocks it.
+ */
 bool can_move_policy(const BoardState& state, int c, int r, Direction direction) {
     const int nc = c + direction_dc(direction);
     const int nr = r + direction_dr(direction);
@@ -194,6 +313,14 @@ bool can_move_policy(const BoardState& state, int c, int r, Direction direction)
     return (policy_wall_at(state, c, r) & direction_wall_bit(direction)) == 0;
 }
 
+/**
+ * @brief Test whether a Factory jump has an active and non-trap landing cell.
+ * @param state Concrete board state.
+ * @param c Source column.
+ * @param r Source row.
+ * @param direction Jump direction.
+ * @return True when the landing cell is in bounds and not fully enclosed.
+ */
 bool can_jump_policy(const BoardState& state, int c, int r, Direction direction) {
     const int nc = c + direction_dc(direction) * 2;
     const int nr = r + direction_dr(direction) * 2;
@@ -203,6 +330,11 @@ bool can_jump_policy(const BoardState& state, int c, int r, Direction direction)
     return policy_wall_at(state, nc, nr) != static_cast<uint8_t>(WALL_N | WALL_E | WALL_S | WALL_W);
 }
 
+/**
+ * @brief Clamp a jump cooldown into the finite BFS cooldown state space.
+ * @param jump_cd Raw cooldown value.
+ * @return BFS cooldown state.
+ */
 int normalize_jump_cd(int jump_cd) {
     if (jump_cd <= 0) {
         return 0;
@@ -213,6 +345,11 @@ int normalize_jump_cd(int jump_cd) {
     return jump_cd;
 }
 
+/**
+ * @brief Advance a BFS cooldown state by one movement edge.
+ * @param jump_cd Current BFS cooldown state.
+ * @return Cooldown state after one time step.
+ */
 int bfs_move_jump_cd(int jump_cd) {
     if (jump_cd >= BFS_BLOCKED_CD) {
         return BFS_BLOCKED_CD;
@@ -220,10 +357,31 @@ int bfs_move_jump_cd(int jump_cd) {
     return std::max(0, jump_cd - 1);
 }
 
+/**
+ * @brief Encode `(active_index, jump_cd)` into the BFS visited array.
+ * @param active_index Active-window cell index.
+ * @param jump_cd Normalized jump cooldown state.
+ * @return Flat visited index.
+ */
 int visited_index(int active_index, int jump_cd) {
     return active_index * BFS_CD_STATES + jump_cd;
 }
 
+/**
+ * @brief Find the first primitive step toward any goal using active-window BFS.
+ * @param state Concrete board state.
+ * @param start_c Source column.
+ * @param start_r Source row.
+ * @param goals Bitboard of target cells.
+ * @param avoid Bitboard of cells reserved or occupied by enemies.
+ * @param depth_limit Maximum BFS depth.
+ * @param init_jump_cd Initial jump cooldown, or sentinel for units that cannot jump.
+ * @return First primitive action on the shortest policy path, or `ACT_IDLE`.
+ *
+ * BFS state includes Factory jump cooldown, so movement edges can decrement the
+ * cooldown and jump edges can reset it.  This lets Factory baseline planning
+ * reason about jumps without a separate pathfinder.
+ */
 Action get_path_policy(const BoardState& state, int start_c, int start_r, const BitBoard& goals,
                        const BitBoard& avoid, int depth_limit, int init_jump_cd) {
     if (!goals.any()) {
@@ -311,6 +469,12 @@ Action get_path_policy(const BoardState& state, int start_c, int start_r, const 
     return ACT_IDLE;
 }
 
+/**
+ * @brief Build a Bitboard containing every active cell in a target row.
+ * @param state Concrete board state.
+ * @param row Absolute target row.
+ * @return Goal Bitboard.
+ */
 BitBoard row_goals(const BoardState& state, int row) {
     BitBoard goals{};
     goals.clear();
@@ -320,6 +484,13 @@ BitBoard row_goals(const BoardState& state, int row) {
     return goals;
 }
 
+/**
+ * @brief Build a one-cell goal Bitboard.
+ * @param state Concrete board state.
+ * @param c Goal column.
+ * @param r Goal row.
+ * @return Goal Bitboard.
+ */
 BitBoard single_goal(const BoardState& state, int c, int r) {
     BitBoard goals{};
     goals.clear();
@@ -327,6 +498,15 @@ BitBoard single_goal(const BoardState& state, int c, int r) {
     return goals;
 }
 
+/**
+ * @brief Select up to three nearest visible crystal cells for a Scout.
+ * @param state Concrete board state.
+ * @param robot_index Scout slot.
+ * @return Goal Bitboard containing the closest crystals.
+ *
+ * Limiting to three crystals controls BFS goal density while still allowing the
+ * Scout to route around obstacles toward high-value visible energy.
+ */
 BitBoard nearest_crystal_goals(const BoardState& state, int robot_index) {
     const int c = state.robots.col[static_cast<size_t>(robot_index)];
     const int r = state.robots.row[static_cast<size_t>(robot_index)];
@@ -368,6 +548,12 @@ BitBoard nearest_crystal_goals(const BoardState& state, int robot_index) {
     return goals;
 }
 
+/**
+ * @brief Find the nearest known mining node for a Miner.
+ * @param state Concrete board state.
+ * @param robot_index Miner slot.
+ * @return Absolute cell index, or `-1` when no node is known.
+ */
 int nearest_mining_node_cell(const BoardState& state, int robot_index) {
     const int c = state.robots.col[static_cast<size_t>(robot_index)];
     const int r = state.robots.row[static_cast<size_t>(robot_index)];
@@ -389,12 +575,26 @@ int nearest_mining_node_cell(const BoardState& state, int robot_index) {
     return best_idx;
 }
 
+/**
+ * @brief Test whether a one-cell step remains inside the active window.
+ * @param state Concrete board state.
+ * @param c Source column.
+ * @param r Source row.
+ * @param direction Direction of travel.
+ * @return True when the step is active-window legal and passable.
+ */
 bool can_step_in_active(const BoardState& state, int c, int r, Direction direction) {
     const int nc = c + direction_dc(direction);
     const int nr = r + direction_dr(direction);
     return state.in_active(nc, nr) && state.can_move_through(c, r, direction);
 }
 
+/**
+ * @brief Choose a simple north-biased passable move.
+ * @param state Concrete board state.
+ * @param robot_index Robot slot.
+ * @return Best local movement primitive or idle.
+ */
 Action best_passable_direction(const BoardState& state, int robot_index) {
     const int c = state.robots.col[static_cast<size_t>(robot_index)];
     const int r = state.robots.row[static_cast<size_t>(robot_index)];
@@ -413,6 +613,14 @@ Action best_passable_direction(const BoardState& state, int robot_index) {
     return ACT_IDLE;
 }
 
+/**
+ * @brief Greedily step toward a target cell with passability fallback.
+ * @param state Concrete board state.
+ * @param robot_index Robot slot.
+ * @param target_c Target column.
+ * @param target_r Target row.
+ * @return Movement primitive or idle.
+ */
 Action step_toward_cell(const BoardState& state, int robot_index, int target_c, int target_r) {
     const int c = state.robots.col[static_cast<size_t>(robot_index)];
     const int r = state.robots.row[static_cast<size_t>(robot_index)];
@@ -442,6 +650,14 @@ Action step_toward_cell(const BoardState& state, int robot_index, int target_c, 
     return best_passable_direction(state, robot_index);
 }
 
+/**
+ * @brief Return a transfer action between adjacent cells.
+ * @param from_c Source column.
+ * @param from_r Source row.
+ * @param to_c Target column.
+ * @param to_r Target row.
+ * @return Transfer primitive or idle if cells are not adjacent.
+ */
 Action adjacent_transfer_action(int from_c, int from_r, int to_c, int to_r) {
     for (Direction direction : POLICY_DIRS) {
         if (from_c + direction_dc(direction) == to_c &&
@@ -452,6 +668,13 @@ Action adjacent_transfer_action(int from_c, int from_r, int to_c, int to_r) {
     return ACT_IDLE;
 }
 
+/**
+ * @brief Have a Factory transfer energy to an adjacent underfilled Worker.
+ * @param state Concrete board state.
+ * @param factory Factory slot.
+ * @param owner Player index.
+ * @return Transfer primitive or idle.
+ */
 Action factory_support_worker_action(const BoardState& state, int factory, int owner) {
     std::array<int, MAX_ROBOTS> workers{};
     int worker_count = 0;
@@ -477,6 +700,13 @@ Action factory_support_worker_action(const BoardState& state, int factory, int o
     return ACT_IDLE;
 }
 
+/**
+ * @brief Transfer a robot's energy to an adjacent friendly Factory.
+ * @param state Concrete board state.
+ * @param robot_index Source robot slot.
+ * @param factory Factory slot.
+ * @return Transfer primitive or idle.
+ */
 Action transfer_to_adjacent_factory(const BoardState& state, int robot_index, int factory) {
     if (factory < 0) {
         return ACT_IDLE;
@@ -491,6 +721,18 @@ Action transfer_to_adjacent_factory(const BoardState& state, int robot_index, in
     return adjacent_transfer_action(c, r, fc, fr);
 }
 
+/**
+ * @brief Collect owner units by role and enemy occupancy into fixed buffers.
+ * @param state Concrete board state.
+ * @param owner Player index.
+ * @param workers Output Worker slots.
+ * @param worker_count Output Worker count.
+ * @param scouts Output Scout slots.
+ * @param scout_count Output Scout count.
+ * @param miners Output Miner slots.
+ * @param miner_count Output Miner count.
+ * @param occupied_enemy Output enemy occupancy Bitboard.
+ */
 void collect_policy_units(const BoardState& state, int owner, std::array<int, MAX_ROBOTS>& workers, int& worker_count,
                           std::array<int, MAX_ROBOTS>& scouts, int& scout_count,
                           std::array<int, MAX_ROBOTS>& miners, int& miner_count,
@@ -519,6 +761,11 @@ void collect_policy_units(const BoardState& state, int owner, std::array<int, MA
     }
 }
 
+/**
+ * @brief Append a macro to a bounded MacroList.
+ * @param list List to mutate.
+ * @param macro Macro intent to append.
+ */
 void add_macro(MacroList& list, MacroAction macro) {
     if (list.count >= MAX_MACROS) {
         return;
@@ -526,6 +773,14 @@ void add_macro(MacroList& list, MacroAction macro) {
     list.macros[static_cast<size_t>(list.count++)] = macro;
 }
 
+/**
+ * @brief Plan a Factory advance toward a future row.
+ * @param state Concrete board state.
+ * @param robot_index Factory slot.
+ * @param avoid Reservation/occupancy Bitboard.
+ * @param depth BFS depth limit.
+ * @return First primitive action on the policy path.
+ */
 Action factory_advance_action(const BoardState& state, int robot_index, const BitBoard& avoid, int depth) {
     const int c = state.robots.col[static_cast<size_t>(robot_index)];
     const int r = state.robots.row[static_cast<size_t>(robot_index)];
@@ -537,10 +792,21 @@ Action factory_advance_action(const BoardState& state, int robot_index, const Bi
 
 }  // namespace
 
+/**
+ * @brief Compute the deterministic baseline action for the engine player.
+ * @param robot_index Simulator-local robot slot.
+ * @return Primitive action for that robot, or idle.
+ */
 Action CrawlerSim::heuristic_action_for(int robot_index) const {
     return heuristic_action_for_owner(robot_index, state.player);
 }
 
+/**
+ * @brief Compute the deterministic baseline action for a specified owner.
+ * @param robot_index Simulator-local robot slot.
+ * @param for_owner Player whose policy controls the slot.
+ * @return Primitive action for that robot, or idle.
+ */
 Action CrawlerSim::heuristic_action_for_owner(int robot_index, int for_owner) const {
     if (robot_index < 0 || robot_index >= state.robots.used ||
         state.robots.alive[static_cast<size_t>(robot_index)] == 0 ||
@@ -553,6 +819,16 @@ Action CrawlerSim::heuristic_action_for_owner(int robot_index, int for_owner) co
     return actions.actions[static_cast<size_t>(robot_index)];
 }
 
+/**
+ * @brief Fill the deterministic baseline joint plan for one owner.
+ * @param owner Player index.
+ * @param actions Mutable primitive action buffer.
+ * @param baseline_macros Optional output macro labels per robot slot.
+ *
+ * The baseline coordinates Factory movement, Worker escort/wall opening, Scout
+ * crystal collection or energy return, and Miner transformation.  Reservations
+ * are represented as Bitboards so later units avoid earlier planned cells.
+ */
 void CrawlerSim::fill_heuristic_plan_for_owner(int owner, PrimitiveActions& actions,
                                                std::array<MacroAction, MAX_ROBOTS>* baseline_macros) const {
     if (owner < 0 || owner > 1) {
@@ -758,6 +1034,15 @@ void CrawlerSim::fill_heuristic_plan_for_owner(int owner, PrimitiveActions& acti
     }
 }
 
+/**
+ * @brief Generate bounded macro intents for one live robot.
+ * @param robot_index Simulator-local robot slot.
+ * @return MacroList containing role-appropriate intents.
+ *
+ * ISMCTS expansion uses this role library to produce one-robot deviations from
+ * the deterministic baseline.  The list is fixed-capacity and ordered so tuned
+ * priors can consistently map to macro names.
+ */
 MacroList CrawlerSim::generate_macros_for(int robot_index) const {
     MacroList list{};
     if (robot_index < 0 || robot_index >= state.robots.used ||
@@ -788,6 +1073,16 @@ MacroList CrawlerSim::generate_macros_for(int robot_index) const {
     return list;
 }
 
+/**
+ * @brief Translate a macro intent into a currently legal primitive action.
+ * @param robot_index Simulator-local robot slot.
+ * @param macro MacroAction chosen by ISMCTS.
+ * @return Primitive action, or idle when role, resource, cooldown, or geometry constraints fail.
+ *
+ * Macro translation intentionally rechecks legality at application time because
+ * sampled Determinizations and earlier joint-plan actions can change walls,
+ * occupancy, cooldowns, and energy before a deeper tree edge is replayed.
+ */
 Action CrawlerSim::primitive_for_macro(int robot_index, MacroAction macro) const {
     if (robot_index < 0 || robot_index >= state.robots.used ||
         state.robots.alive[static_cast<size_t>(robot_index)] == 0) {

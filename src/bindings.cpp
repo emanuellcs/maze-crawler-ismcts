@@ -1,7 +1,15 @@
 #include "crawler_engine.hpp"
 
-// pybind11 bridge between Kaggle's Python observation/action dictionaries and
-// the fixed-buffer C++ engine. Keep policy and simulator rules out of this file.
+/**
+ * @file bindings.cpp
+ * @brief pybind11 bridge between Kaggle dictionaries and the fixed-buffer C++ engine.
+ *
+ * This file is the only Python/C++ translation boundary.  It decodes sparse
+ * Python observation dictionaries into `ObservationInput`, exposes runtime
+ * hyperparameters, and serializes `ActionResult` back to `{uid: action}`.  It
+ * deliberately contains no simulator, policy, or ISMCTS logic so the native hot
+ * path remains testable without Python objects.
+ */
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -34,14 +42,25 @@ constexpr std::array<crawler::MacroAction, 15> HYPERPARAMETER_MACROS{
     crawler::MACRO_MINER_TRANSFORM,
 };
 
-// Tunable keys intentionally mirror macro_action_name() without the MACRO_
-// prefix, so Python search spaces can be human-readable and typo-checked.
+/**
+ * @brief Validate positive finite numeric hyperparameters.
+ * @param key Human-readable hyperparameter key.
+ * @param value Numeric value supplied by Python.
+ * @throws py::value_error when value is non-finite or non-positive.
+ */
 void require_positive_finite(const std::string& key, double value) {
     if (!std::isfinite(value) || value <= 0.0) {
         throw py::value_error(key + " must be a positive finite number");
     }
 }
 
+/**
+ * @brief Set a macro prior by its pybind-exposed string name.
+ * @param hyperparameters Hyperparameter object to mutate.
+ * @param key Macro name matching `macro_action_name`.
+ * @param value Positive finite prior value.
+ * @return True when the key matched a macro prior.
+ */
 bool set_macro_prior(crawler::Hyperparameters& hyperparameters, const std::string& key, double value) {
     for (const crawler::MacroAction macro : HYPERPARAMETER_MACROS) {
         if (key == crawler::macro_action_name(macro)) {
@@ -53,6 +72,17 @@ bool set_macro_prior(crawler::Hyperparameters& hyperparameters, const std::strin
     return false;
 }
 
+/**
+ * @brief Apply one Python hyperparameter key/value pair.
+ * @param hyperparameters Hyperparameter object to mutate.
+ * @param key Python dictionary key.
+ * @param value Python value handle.
+ * @throws py::key_error for unknown keys.
+ * @throws py::value_error for invalid values.
+ *
+ * Tunable keys intentionally mirror `macro_action_name()` without a `MACRO_`
+ * prefix so Optuna search spaces stay human-readable and typo-checked.
+ */
 void apply_hyperparameter(crawler::Hyperparameters& hyperparameters, const std::string& key,
                           const py::handle& value) {
     if (key == "rollout_depth") {
@@ -82,6 +112,11 @@ void apply_hyperparameter(crawler::Hyperparameters& hyperparameters, const std::
     throw py::key_error("unknown hyperparameter: " + key);
 }
 
+/**
+ * @brief Serialize hyperparameters into a Python dictionary.
+ * @param hyperparameters Native hyperparameter object.
+ * @return Python dictionary suitable for tests and tuning logs.
+ */
 py::dict hyperparameters_to_dict(const crawler::Hyperparameters& hyperparameters) {
     py::dict out;
     out["C_puct"] = hyperparameters.C_puct;
@@ -93,8 +128,13 @@ py::dict hyperparameters_to_dict(const crawler::Hyperparameters& hyperparameters
     return out;
 }
 
-// Python observations key sparse cells as "col,row"; this helper decodes that
-// form without allocating temporary structured objects in C++.
+/**
+ * @brief Decode a sparse cell key of the form `"col,row"`.
+ * @param key Python dictionary key converted to string.
+ * @param col Output column.
+ * @param row Output absolute row.
+ * @return True when parsing succeeds.
+ */
 bool parse_cell_key(const std::string& key, int& col, int& row) {
     const std::size_t comma = key.find(',');
     if (comma == std::string::npos) {
@@ -109,8 +149,23 @@ bool parse_cell_key(const std::string& key, int& col, int& row) {
     return true;
 }
 
-// Convert Python dict/list observation fields into the fixed-buffer C++ input
-// struct expected by BeliefState and CrawlerSim.
+/**
+ * @brief Convert Python observation fields into the fixed-buffer native input.
+ * @param player Current player index.
+ * @param walls_obj Flat length-400 wall sequence or `None`; values are bitfields or `-1`.
+ * @param crystals Mapping `"col,row" -> energy` for visible crystals.
+ * @param robots Mapping `uid -> [type, col, row, energy, owner, move_cd, jump_cd, build_cd]`.
+ * @param mines Mapping `"col,row" -> [energy, maxEnergy, owner]`.
+ * @param mining_nodes Mapping `"col,row" -> 1` for visible mining nodes.
+ * @param south_bound Current active-window south row.
+ * @param north_bound Current active-window north row.
+ * @param step Public environment step, or `-1` when absent.
+ * @return Fixed-buffer ObservationInput consumed by BeliefState and CrawlerSim.
+ *
+ * The conversion clamps counts to compile-time capacities.  This protects the
+ * native hot path from Python container sizes and keeps all downstream search
+ * structures allocation-free.
+ */
 crawler::ObservationInput make_observation(int player, const py::object& walls_obj, const py::dict& crystals,
                                            const py::dict& robots, const py::dict& mines,
                                            const py::dict& mining_nodes, int south_bound,
@@ -212,7 +267,11 @@ crawler::ObservationInput make_observation(int player, const py::object& walls_o
     return obs;
 }
 
-// Convert fixed-buffer action results back to the Kaggle `{uid: action}` dict.
+/**
+ * @brief Convert a fixed-buffer ActionResult into a Kaggle action dictionary.
+ * @param result Native UID/action buffer.
+ * @return Python dict mapping UID strings to action strings.
+ */
 py::dict action_result_to_dict(const crawler::ActionResult& result) {
     py::dict out;
     for (int i = 0; i < result.count; ++i) {
@@ -222,7 +281,11 @@ py::dict action_result_to_dict(const crawler::ActionResult& result) {
     return out;
 }
 
-// Small inspection surface for Python smoke tests and debugging.
+/**
+ * @brief Summarize a BoardState for Python smoke tests and debugging.
+ * @param state Concrete board state to inspect.
+ * @return Python dictionary with scalar state and live robot records.
+ */
 py::dict board_summary(const crawler::BoardState& state) {
     py::dict out;
     out["player"] = state.player;
@@ -266,12 +329,33 @@ py::dict board_summary(const crawler::BoardState& state) {
     return out;
 }
 
-// Thin pybind facade. It owns one C++ Engine and translates Python dict actions
-// into simulator-indexed PrimitiveActions.
+/**
+ * @brief Thin Python-visible facade that owns one native Engine.
+ *
+ * PyEngine performs argument conversion and delegates all belief, simulation,
+ * policy, and ISMCTS work to C++.  Direct `step()` support is intended for
+ * deterministic tests and debug tools.
+ */
 class PyEngine {
 public:
+    /**
+     * @brief Construct a native engine for one player.
+     * @param player Player index in `{0, 1}`.
+     */
     explicit PyEngine(int player = 0) : engine(player) {}
 
+    /**
+     * @brief Update the native engine from Python observation fields.
+     * @param player Current player index.
+     * @param walls Flat wall sequence of active-window length, or `None`.
+     * @param crystals Visible crystal mapping.
+     * @param robots Robot mapping keyed by UID.
+     * @param mines Remembered mine mapping.
+     * @param mining_nodes Visible mining-node mapping.
+     * @param south_bound Current south bound.
+     * @param north_bound Current north bound.
+     * @param step Public environment step.
+     */
     void update_observation(int player, const py::object& walls, const py::dict& crystals,
                             const py::dict& robots, const py::dict& mines,
                             const py::dict& mining_nodes, int south_bound, int north_bound,
@@ -281,20 +365,38 @@ public:
         engine.update_observation(obs);
     }
 
+    /**
+     * @brief Choose actions for the current observation.
+     * @param time_budget_ms Search budget in milliseconds.
+     * @param seed Deterministic root seed.
+     * @return Python action dictionary.
+     */
     py::dict choose_actions(int time_budget_ms = 2000, uint64_t seed = 0) {
         return action_result_to_dict(engine.choose_actions(time_budget_ms, seed));
     }
 
+    /**
+     * @brief Apply a Python dictionary of hyperparameters to the native engine.
+     * @param params Mapping of scalar search parameters and macro priors.
+     */
     void set_hyperparameters(const py::dict& params) {
         for (auto item : params) {
             apply_hyperparameter(engine.hyperparameters, py::cast<std::string>(py::str(item.first)), item.second);
         }
     }
 
+    /**
+     * @brief Read current native hyperparameters.
+     * @return Python dictionary of search parameters and macro priors.
+     */
     py::dict get_hyperparameters() const {
         return hyperparameters_to_dict(engine.hyperparameters);
     }
 
+    /**
+     * @brief Step the simulator directly with Python primitive actions.
+     * @param actions Mapping `uid -> action_string`.
+     */
     void step(const py::dict& actions) {
         crawler::PrimitiveActions primitive{};
         primitive.clear();
@@ -309,14 +411,28 @@ public:
         engine.step_actions(primitive);
     }
 
+    /**
+     * @brief Return a debug summary of one belief Determinization.
+     * @param seed Deterministic sample seed.
+     * @return Python board summary dictionary.
+     */
     py::dict determinize(uint64_t seed = 0) const {
         return board_summary(engine.determinize(seed));
     }
 
+    /**
+     * @brief Return a debug summary of the current concrete simulator snapshot.
+     * @return Python board summary dictionary.
+     */
     py::dict debug_state() const {
         return board_summary(engine.sim.state);
     }
 
+    /**
+     * @brief Evaluate the current simulator snapshot through the rollout value model.
+     * @param player Perspective player, or `-1` for engine player.
+     * @return Smooth value in approximately `[-1, 1]`.
+     */
     float debug_mcts_value(int player = -1) const {
         return engine.debug_mcts_value(player);
     }
@@ -327,6 +443,10 @@ private:
 
 }  // namespace
 
+/**
+ * @brief Register the `crawler_engine` pybind11 extension module.
+ * @param m Python module handle.
+ */
 PYBIND11_MODULE(crawler_engine, m) {
     m.doc() = "Fixed-buffer C++ engine scaffold for Kaggle Maze Crawler.";
     m.attr("__version__") = "0.1.0";
