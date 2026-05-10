@@ -23,6 +23,26 @@ except Exception as exc:  # pragma: no cover - fallback is for submission diagno
 _ENGINES = {}
 _JIT_ATTEMPTED = False
 _ROOT = Path(__file__).resolve().parent
+BEST_PARAMS = {
+    "C_puct": 2.0884330868271443,
+    "baseline_prior_multiplier": 1.8863044112273712,
+    "rollout_depth": 80,
+    "IDLE": 0.49504719444108913,
+    "FACTORY_SUPPORT_WORKER": 1.0390992283842135,
+    "FACTORY_SAFE_ADVANCE": 2.161864767112469,
+    "FACTORY_BUILD_WORKER": 0.997532683560502,
+    "FACTORY_BUILD_SCOUT": 1.8649154683704814,
+    "FACTORY_BUILD_MINER": 0.8269752415957998,
+    "FACTORY_JUMP_OBSTACLE": 1.4925105256980329,
+    "WORKER_OPEN_NORTH_WALL": 0.7351332485632837,
+    "WORKER_ESCORT_FACTORY": 1.583596636264722,
+    "WORKER_ADVANCE": 0.8874633406271473,
+    "SCOUT_HUNT_CRYSTAL": 1.083268581072123,
+    "SCOUT_EXPLORE_NORTH": 1.6851712172373043,
+    "SCOUT_RETURN_ENERGY": 1.1040824358243229,
+    "MINER_SEEK_NODE": 0.6983213636231111,
+    "MINER_TRANSFORM": 0.5309500821275892,
+}
 
 
 def _jit_log(message):
@@ -222,6 +242,7 @@ def agent(obs, config):
     engine = _ENGINES.get(player)
     if engine is None:
         engine = crawler_engine.Engine(player)
+        engine.set_hyperparameters(BEST_PARAMS)
         _ENGINES[player] = engine
 
     step = int(_get(obs, "step", -1))

@@ -114,11 +114,11 @@ def test_bridge_smoke():
 def test_hyperparameters_roundtrip_validation_and_action_generation():
     engine = make_engine({"f0": [0, 5, 2, 1000, 0, 0, 0, 0]})
     defaults = engine.get_hyperparameters()
-    assert defaults["C_puct"] == pytest.approx(1.35)
-    assert defaults["baseline_prior_multiplier"] == pytest.approx(1.35)
-    assert defaults["rollout_depth"] == 48
-    assert defaults["FACTORY_SUPPORT_WORKER"] == pytest.approx(1.40)
-    assert defaults["FACTORY_BUILD_WORKER"] == pytest.approx(1.25)
+    assert defaults["C_puct"] == pytest.approx(2.0884330868271443)
+    assert defaults["baseline_prior_multiplier"] == pytest.approx(1.8863044112273712)
+    assert defaults["rollout_depth"] == 80
+    assert defaults["FACTORY_SUPPORT_WORKER"] == pytest.approx(1.0390992283842135)
+    assert defaults["FACTORY_BUILD_WORKER"] == pytest.approx(0.997532683560502)
 
     engine.set_hyperparameters(
         {

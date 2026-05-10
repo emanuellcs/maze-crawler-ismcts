@@ -10,24 +10,23 @@ Hyperparameters::Hyperparameters() {
 }
 
 void Hyperparameters::reset_macro_priors() {
-    // Defaults reproduce the original anonymous-namespace constants from the
-    // MCTS implementation. Keep this table synchronized with README tuning docs.
+    // Macro priors use the best Optuna study results found during tuning.
     macro_prior.fill(0.20F);
-    macro_prior[static_cast<size_t>(MACRO_IDLE)] = 0.20F;
-    macro_prior[static_cast<size_t>(MACRO_FACTORY_SUPPORT_WORKER)] = 1.40F;
-    macro_prior[static_cast<size_t>(MACRO_FACTORY_SAFE_ADVANCE)] = 1.00F;
-    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_WORKER)] = 1.25F;
-    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_SCOUT)] = 1.10F;
-    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_MINER)] = 0.85F;
-    macro_prior[static_cast<size_t>(MACRO_FACTORY_JUMP_OBSTACLE)] = 0.90F;
-    macro_prior[static_cast<size_t>(MACRO_WORKER_OPEN_NORTH_WALL)] = 1.00F;
-    macro_prior[static_cast<size_t>(MACRO_WORKER_ESCORT_FACTORY)] = 0.70F;
-    macro_prior[static_cast<size_t>(MACRO_WORKER_ADVANCE)] = 0.95F;
-    macro_prior[static_cast<size_t>(MACRO_SCOUT_HUNT_CRYSTAL)] = 1.00F;
-    macro_prior[static_cast<size_t>(MACRO_SCOUT_EXPLORE_NORTH)] = 0.85F;
-    macro_prior[static_cast<size_t>(MACRO_SCOUT_RETURN_ENERGY)] = 0.75F;
-    macro_prior[static_cast<size_t>(MACRO_MINER_SEEK_NODE)] = 0.95F;
-    macro_prior[static_cast<size_t>(MACRO_MINER_TRANSFORM)] = 1.15F;
+    macro_prior[static_cast<size_t>(MACRO_IDLE)] = 0.49504719444108913F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_SUPPORT_WORKER)] = 1.0390992283842135F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_SAFE_ADVANCE)] = 2.161864767112469F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_WORKER)] = 0.997532683560502F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_SCOUT)] = 1.8649154683704814F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_BUILD_MINER)] = 0.8269752415957998F;
+    macro_prior[static_cast<size_t>(MACRO_FACTORY_JUMP_OBSTACLE)] = 1.4925105256980329F;
+    macro_prior[static_cast<size_t>(MACRO_WORKER_OPEN_NORTH_WALL)] = 0.7351332485632837F;
+    macro_prior[static_cast<size_t>(MACRO_WORKER_ESCORT_FACTORY)] = 1.583596636264722F;
+    macro_prior[static_cast<size_t>(MACRO_WORKER_ADVANCE)] = 0.8874633406271473F;
+    macro_prior[static_cast<size_t>(MACRO_SCOUT_HUNT_CRYSTAL)] = 1.083268581072123F;
+    macro_prior[static_cast<size_t>(MACRO_SCOUT_EXPLORE_NORTH)] = 1.6851712172373043F;
+    macro_prior[static_cast<size_t>(MACRO_SCOUT_RETURN_ENERGY)] = 1.1040824358243229F;
+    macro_prior[static_cast<size_t>(MACRO_MINER_SEEK_NODE)] = 0.6983213636231111F;
+    macro_prior[static_cast<size_t>(MACRO_MINER_TRANSFORM)] = 0.5309500821275892F;
 }
 
 float Hyperparameters::prior_for(MacroAction macro) const {
