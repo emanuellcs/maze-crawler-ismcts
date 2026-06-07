@@ -95,6 +95,14 @@ void Engine::step_actions(const PrimitiveActions& actions) {
 }
 
 /**
+ * @brief Set the maximum search threads.
+ * @param n Thread count.
+ */
+void Engine::set_search_thread_limit(int n) {
+    hyperparameters.search_threads = std::max(1, n);
+}
+
+/**
  * @brief Produce a concrete hidden-world sample for ISMCTS.
  * @param seed Deterministic sample seed.
  * @return BoardState containing sampled hidden facts and exact observed robots.

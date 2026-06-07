@@ -17,6 +17,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <thread>
+#include <vector>
 
 namespace crawler {
 namespace {
@@ -527,10 +530,10 @@ int MCTSArena::create_node(int parent, int depth, float prior) {
  * @param seed Root seed for deterministic per-iteration samples.
  * @return UID/action buffer for all controlled live robots.
  *
- * The loop stops when either the deadline is reached or the fixed arena is full.
- * Each iteration samples a Determinization from belief, traverses/expands the
- * information-set tree with PUCT, rolls out deterministic policy, and
- * backpropagates the root-player value.
+ * The search uses Root Parallelization if `hyperparameters.search_threads > 1`.
+ * Each thread runs an independent MCTS search on its own arena.  After the
+ * threads join, the visits and value sums of root children are aggregated
+ * across all arenas.  Children are matched by their joint macro plans.
  */
 ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
     bool has_controlled_robot = false;
@@ -541,80 +544,155 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
             break;
         }
     }
-    if (!has_controlled_robot) {
+    if (!has_controlled_robot || time_budget_ms <= 0) {
         return build_result_from_plan(sim, nullptr);
     }
 
-    if (time_budget_ms <= 0) {
-        return build_result_from_plan(sim, nullptr);
-    }
-
-    mcts.reset();
-    const int root = mcts.create_node(-1, 0, 1.0F);
-    if (root < 0) {
-        return build_result_from_plan(sim, nullptr);
-    }
-
-    const auto start = std::chrono::steady_clock::now();
+    const int num_threads = std::max(1, hyperparameters.search_threads);
+    const auto start_time = std::chrono::steady_clock::now();
     const int guard_ms = time_budget_ms >= 10 ? 2 : 0;
-    const int run_ms = std::max(1, time_budget_ms - guard_ms);
-    const auto deadline = start + std::chrono::milliseconds(run_ms);
-    const int clock_check_interval = time_budget_ms <= 20 ? 1 : 8;
+    const auto deadline = start_time + std::chrono::milliseconds(std::max(1, time_budget_ms - guard_ms));
 
-    int iterations = 0;
-    while (mcts.used < MAX_TREE_NODES) {
-        if ((iterations % clock_check_interval) == 0 && std::chrono::steady_clock::now() >= deadline) {
-            break;
+    auto worker = [&](MCTSArena& arena, uint64_t thread_seed) {
+        arena.reset();
+        const int root = arena.create_node(-1, 0, 1.0F);
+        if (root < 0) return;
+
+        const int clock_check_interval = time_budget_ms <= 20 ? 1 : 8;
+        int iterations = 0;
+
+        while (arena.used < MAX_TREE_NODES) {
+            if ((iterations % clock_check_interval) == 0 && std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+
+            CrawlerSim search_sim{};
+            search_sim.state = determinize(detail::mix64(thread_seed ^ (static_cast<uint64_t>(iterations + 1) * ITERATION_SEED)));
+
+            std::array<int, MCTS_TREE_DEPTH + 2> path{};
+            int path_count = 0;
+            int node = root;
+            path[static_cast<size_t>(path_count++)] = root;
+
+            while (!search_sim.state.done) {
+                MCTSNode& current = arena.nodes[static_cast<size_t>(node)];
+                if (current.depth >= MCTS_TREE_DEPTH) break;
+                if (current.expanded == 0) {
+                    expand_node(arena, node, search_sim, sim.state.player, hyperparameters);
+                }
+                if (current.child_count <= 0) break;
+
+                const int child = select_child(arena, node, hyperparameters);
+                if (child < 0) break;
+                apply_node_plan(search_sim, arena.nodes[static_cast<size_t>(child)], sim.state.player);
+                node = child;
+                path[static_cast<size_t>(path_count++)] = node;
+
+                if (arena.nodes[static_cast<size_t>(node)].visits == 0 ||
+                    path_count >= static_cast<int>(path.size())) {
+                    break;
+                }
+            }
+
+            const float value = rollout(search_sim, sim.state.player, hyperparameters.rollout_depth);
+            backpropagate(arena, path, path_count, value);
+            ++iterations;
         }
+    };
 
-        CrawlerSim search_sim{};
-        /*
-         * The seed sequence combines the caller seed with an iteration constant
-         * so consecutive samples explore different hidden worlds reproducibly.
-         */
-        search_sim.state = determinize(detail::mix64(seed ^ (static_cast<uint64_t>(iterations + 1) * ITERATION_SEED)));
-
-        std::array<int, MCTS_TREE_DEPTH + 2> path{};
-        int path_count = 0;
-        int node = root;
-        path[static_cast<size_t>(path_count++)] = root;
-
-        while (!search_sim.state.done) {
-            MCTSNode& current = mcts.nodes[static_cast<size_t>(node)];
-            if (current.depth >= MCTS_TREE_DEPTH) {
-                break;
-            }
-            if (current.expanded == 0) {
-                expand_node(mcts, node, search_sim, sim.state.player, hyperparameters);
-            }
-            if (current.child_count <= 0) {
-                break;
-            }
-
-            const int child = select_child(mcts, node, hyperparameters);
-            if (child < 0) {
-                break;
-            }
-            apply_node_plan(search_sim, mcts.nodes[static_cast<size_t>(child)], sim.state.player);
-            node = child;
-            path[static_cast<size_t>(path_count++)] = node;
-
-            if (mcts.nodes[static_cast<size_t>(node)].visits == 0 ||
-                path_count >= static_cast<int>(path.size())) {
-                break;
-            }
-        }
-
-        const float value = rollout(search_sim, sim.state.player, hyperparameters.rollout_depth);
-        backpropagate(mcts, path, path_count, value);
-        ++iterations;
+    if (num_threads == 1) {
+        worker(mcts, seed);
+        const int best_child = best_root_child(mcts, 0);
+        return build_result_from_plan(sim, best_child >= 0 ? &mcts.nodes[static_cast<size_t>(best_child)] : nullptr);
     }
 
-    const int best_child = best_root_child(mcts, root);
-    if (best_child < 0) {
+    std::vector<std::unique_ptr<MCTSArena>> arenas;
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_threads; ++i) {
+        arenas.push_back(std::make_unique<MCTSArena>());
+        threads.emplace_back(worker, std::ref(*arenas.back()), seed + static_cast<uint64_t>(i));
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    /* Aggregate root children from all arenas. */
+    struct AggregatedChild {
+        std::array<MacroAction, MAX_MCTS_PLAN_ROBOTS> macro{};
+        int visits = 0;
+        float value_sum = 0.0F;
+        int arena_idx = -1;
+        int node_idx = -1;
+    };
+    std::vector<AggregatedChild> aggregated;
+
+    for (int i = 0; i < num_threads; ++i) {
+        const MCTSArena& arena = *arenas[static_cast<size_t>(i)];
+        if (arena.used <= 0) continue;
+        const MCTSNode& root_node = arena.nodes[0];
+        for (int child = root_node.first_child; child >= 0; child = arena.nodes[static_cast<size_t>(child)].next_sibling) {
+            const MCTSNode& node = arena.nodes[static_cast<size_t>(child)];
+            if (node.visits <= 0) continue;
+
+            bool found = false;
+            for (auto& agg : aggregated) {
+                bool match = true;
+                if (node.plan_count != static_cast<int>(MAX_MCTS_PLAN_ROBOTS)) {
+                    /* If plan_count varies, we'd need to compare it too. But it's fixed in Engine::choose_actions. */
+                }
+                for (int m = 0; m < MAX_MCTS_PLAN_ROBOTS; ++m) {
+                    if (node.plan_macro[static_cast<size_t>(m)] != agg.macro[static_cast<size_t>(m)]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    agg.visits += node.visits;
+                    agg.value_sum += node.value_sum;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                AggregatedChild agg{};
+                for (int m = 0; m < MAX_MCTS_PLAN_ROBOTS; ++m) {
+                    agg.macro[static_cast<size_t>(m)] = node.plan_macro[static_cast<size_t>(m)];
+                }
+                agg.visits = node.visits;
+                agg.value_sum = node.value_sum;
+                agg.arena_idx = i;
+                agg.node_idx = child;
+                aggregated.push_back(agg);
+            }
+        }
+    }
+
+    if (aggregated.empty()) {
         return build_result_from_plan(sim, nullptr);
     }
-    return build_result_from_plan(sim, &mcts.nodes[static_cast<size_t>(best_child)]);
+
+    int best_idx = -1;
+    int best_visits = -1;
+    float best_value = -std::numeric_limits<float>::infinity();
+
+    for (int i = 0; i < static_cast<int>(aggregated.size()); ++i) {
+        const auto& agg = aggregated[static_cast<size_t>(i)];
+        const float avg_value = agg.value_sum / static_cast<float>(agg.visits);
+        if (agg.visits > best_visits || (agg.visits == best_visits && avg_value > best_value)) {
+            best_visits = agg.visits;
+            best_value = avg_value;
+            best_idx = i;
+        }
+    }
+
+    if (best_idx < 0) {
+        return build_result_from_plan(sim, nullptr);
+    }
+
+    const auto& best = aggregated[static_cast<size_t>(best_idx)];
+    return build_result_from_plan(sim, &arenas[static_cast<size_t>(best.arena_idx)]->nodes[static_cast<size_t>(best.node_idx)]);
 }
 
 /**

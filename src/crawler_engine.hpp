@@ -177,7 +177,7 @@ enum MacroAction : uint8_t {
  * Bitboards encode tactical facts for the currently visible/active window:
  * occupancy, visibility, crystals, mines, and mining nodes.  Bitwise shifts and
  * masks replace array lookups in tight policy loops, giving O(1) collision and
- * goal membership tests during Rollouts.
+ * goal membership tests during Rollouts and macro-policy generation.
  */
 struct BitBoard {
     std::array<uint64_t, ACTIVE_WORDS> words{};
@@ -555,6 +555,8 @@ struct MacroList {
  * tuning without recompiling the native extension.
  */
 struct Hyperparameters {
+    /** @brief Number of parallel search threads to run. */
+    int search_threads = 1;
     /** @brief Exploration strength in PUCT child selection. */
     float C_puct = 2.0884330868271443F;
     /** @brief Extra prior mass assigned to the deterministic all-robot baseline plan. */
@@ -774,6 +776,12 @@ public:
      * @return BoardState suitable for one ISMCTS iteration.
      */
     [[nodiscard]] BoardState determinize(uint64_t seed) const;
+
+    /**
+     * @brief Set the maximum number of search threads.
+     * @param n Maximum number of threads (must be >= 1).
+     */
+    void set_search_thread_limit(int n);
 
     /**
      * @brief Choose Kaggle-compatible actions via fixed-arena ISMCTS.
