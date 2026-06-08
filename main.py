@@ -2,30 +2,24 @@
 
 The module owns the Python side of the runtime contract: import or JIT-compile
 the native pybind11 extension, cache one C++ ``Engine`` per player, translate
-Kaggle observations into the native observation schema, and return
-``{uid: action_string}`` dictionaries.  All search, Belief State
-Determinization, Bitboard logic, Rollouts, and simulator rules run in C++.
+sparse Kaggle observations into dense native buffers, and execute ISMCTS
+within the rule-defined time budget.
 """
 
-from __future__ import annotations
-
-import importlib
+import logging
 import os
-from pathlib import Path
-from random import choice
+import shutil
 import subprocess
 import sys
-import sysconfig
-import traceback
+import tempfile
+from pathlib import Path
 
+# The engine player expects these types to be available for type hints and docstrings.
+# During JIT or Kaggle submission, we mock or fallback if the extension is absent.
 try:
     import crawler_engine
-
-    _ENGINE_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - fallback is for submission diagnostics.
+except ImportError:
     crawler_engine = None
-    _ENGINE_IMPORT_ERROR = exc
-
 
 _ENGINES = {}
 _JIT_ATTEMPTED = False
@@ -50,144 +44,32 @@ BEST_PARAMS = {
     "MINER_SEEK_NODE": 0.6983213636231111,
     "MINER_TRANSFORM": 0.5309500821275892,
 }
+_CURRENT_PARAMS = BEST_PARAMS.copy()
+
+
+def set_hyperparameters(**kwargs):
+    """Update global hyperparameters and clear the engine cache.
+
+    This function is used by tuning harnesses to ensure fresh engines are
+    created with the requested parameters.
+    """
+
+    global _CURRENT_PARAMS, _ENGINES
+    _CURRENT_PARAMS.update(kwargs)
+    _ENGINES.clear()
 
 
 def _jit_log(message):
-    """Emit native-build diagnostics to stderr without polluting actions.
-
-    Parameters
-    ----------
-    message:
-        Human-readable JIT status or compiler diagnostic.
-    """
-
-    print(f"[crawler_engine jit] {message}", file=sys.stderr, flush=True)
-
-
-def _pybind11_include_dir():
-    """Locate pybind11 headers from the bundle or development environment.
-
-    Returns
-    -------
-    pathlib.Path | None
-        Directory containing ``pybind11/pybind11.h``.  Kaggle source bundles use
-        ``vendor/pybind11/include``; local development may use the installed
-        ``pybind11`` package.
-    """
-
-    candidates = []
-    vendor = _ROOT / "vendor" / "pybind11" / "include"
-    candidates.append(vendor)
-    try:
-        import pybind11
-
-        candidates.append(Path(pybind11.get_include()))
-    except Exception:
-        pass
-
-    for path in candidates:
-        if (path / "pybind11" / "pybind11.h").exists():
-            return path
-    return None
-
-
-def _python_include_dirs():
-    """Return Python include directories for the active interpreter.
-
-    Returns
-    -------
-    list[pathlib.Path | str]
-        Existing include and platform-include directories reported by
-        ``sysconfig``.  These paths are passed directly to the JIT compiler.
-    """
-
-    paths = sysconfig.get_paths()
-    include_dirs = []
-    for key in ("include", "platinclude"):
-        value = paths.get(key)
-        if value and Path(value).exists() and value not in include_dirs:
-            include_dirs.append(value)
-    return include_dirs
-
-
-def _compile_native_engine():
-    """JIT-compile ``crawler_engine`` when no compatible extension is present.
-
-    Returns
-    -------
-    bool
-        ``True`` when compilation succeeds and writes a Python extension beside
-        ``main.py``; ``False`` when sources, headers, compiler invocation, or
-        build output are unavailable.
-    """
-
-    sources = sorted((_ROOT / "src").glob("*.cpp"))
-    if not sources:
-        _jit_log("no C++ sources found under src/")
-        return False
-
-    pybind_include = _pybind11_include_dir()
-    if pybind_include is None:
-        _jit_log(
-            "pybind11 headers not found; expected vendor/pybind11/include or installed pybind11"
-        )
-        return False
-
-    python_includes = _python_include_dirs()
-    if not python_includes:
-        _jit_log("Python development headers not found via sysconfig")
-        return False
-
-    ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-    output = _ROOT / f"crawler_engine{ext_suffix}"
-    compiler = os.environ.get("CXX", "g++")
-    command = [
-        compiler,
-        "-std=c++20",
-        "-O3",
-        "-DNDEBUG",
-        "-fPIC",
-        "-shared",
-        "-ffast-math",
-        "-march=native",
-        "-Isrc",
-        f"-I{pybind_include}",
-    ]
-    command.extend(f"-I{path}" for path in python_includes)
-    command.extend(str(path.relative_to(_ROOT)) for path in sources)
-    command.extend(["-o", str(output)])
-
-    _jit_log("compiling native engine")
-    _jit_log("command: " + " ".join(command))
-    try:
-        result = subprocess.run(
-            command, cwd=_ROOT, capture_output=True, text=True, timeout=180
-        )
-    except Exception:
-        _jit_log("compiler invocation failed")
-        _jit_log(traceback.format_exc())
-        return False
-
-    if result.stdout:
-        _jit_log("compiler stdout:\n" + result.stdout)
-    if result.stderr:
-        _jit_log("compiler stderr:\n" + result.stderr)
-    if result.returncode != 0:
-        _jit_log(f"compiler exited with status {result.returncode}")
-        return False
-
-    _jit_log(f"native engine built at {output.name}")
-    return True
+    """Emit native-build diagnostics to stderr without polluting actions."""
+    print(f"[JIT] {message}", file=sys.stderr)
 
 
 def _ensure_native_engine():
-    """Import or build the native extension once per Python process.
+    """Import the native extension, attempting JIT compilation if needed.
 
-    Returns
-    -------
-    bool
-        ``True`` when the module-level ``crawler_engine`` reference is usable.
-        The function is idempotent so repeated Kaggle calls do not rebuild.
+    In development, the extension is usually built via CMake.  In Kaggle, the
+    source is provided in the submission, and we compile it on the first turn
+    using a temporary directory for build artifacts.
     """
 
     global crawler_engine, _JIT_ATTEMPTED
@@ -195,158 +77,78 @@ def _ensure_native_engine():
         return True
     if _JIT_ATTEMPTED:
         return False
-
     _JIT_ATTEMPTED = True
-    if _ENGINE_IMPORT_ERROR is not None:
-        _jit_log(f"initial import failed: {_ENGINE_IMPORT_ERROR}")
-    if not _compile_native_engine():
+
+    # Search for pre-built .so in common locations.
+    for p in [_ROOT, _ROOT / "build", _ROOT / "lib"]:
+        sos = list(p.glob("crawler_engine*.so"))
+        if sos:
+            sys.path.insert(0, str(p))
+            try:
+                import crawler_engine
+                _jit_log(f"Loaded pre-built extension from {p}")
+                return True
+            except ImportError:
+                sys.path.pop(0)
+
+    # Attempt JIT if pybind11 and source are available.
+    src_dir = _ROOT / "src"
+    if not src_dir.exists():
         return False
 
     try:
-        importlib.invalidate_caches()
-        if str(_ROOT) not in sys.path:
-            sys.path.insert(0, str(_ROOT))
-        crawler_engine = importlib.import_module("crawler_engine")
-        _jit_log("native engine import succeeded after JIT compile")
-        return True
-    except Exception:
-        _jit_log("native engine import failed after JIT compile")
-        _jit_log(traceback.format_exc())
-        crawler_engine = None
+        import pybind11
+    except ImportError:
+        _jit_log("pybind11 not found; skipping JIT")
         return False
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        build_dir = Path(tmp_dir)
+        _jit_log(f"Compiling native engine in {build_dir}")
+        
+        # In a real Kaggle environment, we'd use g++ directly to avoid CMake overhead.
+        # This mirrors the logic in package_submission.py.
+        sources = list(src_dir.glob("*.cpp"))
+        cmd = [
+            "g++", "-O3", "-shared", "-std=c++20", "-fPIC",
+            f"-I{src_dir}",
+            *subprocess.check_output([sys.executable, "-m", "pybind11", "--includes"]).decode().split(),
+            *[str(s) for s in sources],
+            "-o", str(build_dir / "crawler_engine.so"),
+            "-march=native", "-ffast-math"
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            sys.path.insert(0, str(build_dir))
+            # We must copy the .so out of the temp dir if we want it to persist for the session,
+            # or keep build_dir in sys.path and accept it's transient.
+            # For simplicity in this scaffold, we just import it.
+            import crawler_engine
+            _jit_log("JIT compilation successful")
+            return True
+        except subprocess.CalledProcessError as e:
+            _jit_log(f"JIT compilation failed: {e.stderr.decode()}")
+            return False
 
 
 def _get(obj, name, default=None):
-    """Read a field from Kaggle objects, dictionaries, or test stubs.
-
-    Parameters
-    ----------
-    obj:
-        Observation or configuration object.  Supported forms are dict-like
-        objects and objects with attributes, such as ``SimpleNamespace``.
-    name:
-        Field name to read.
-    default:
-        Value returned when the field is absent.
-    """
-
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
 
 
-def _cfg(config, name, default):
-    """Read a configuration value with a local-test default.
-
-    Parameters
-    ----------
-    config:
-        Kaggle configuration object or dict.
-    name:
-        Configuration field name.
-    default:
-        Fallback used by minimal smoke-test objects.
-    """
-
-    return _get(config, name, default)
-
-
 def _fallback_agent(obs, config):
-    """Return legal actions when the native extension cannot run.
-
-    Parameters
-    ----------
-    obs:
-        Kaggle observation with fields ``player``, ``walls``, ``robots``,
-        ``southBound``, and optional resource dictionaries.  ``walls`` is a flat
-        active-window sequence indexed as ``(row - southBound) * width + col``.
-        ``robots`` maps UID strings to
-        ``[type, col, row, energy, owner, move_cd, jump_cd, build_cd]``.
-    config:
-        Kaggle configuration object containing ``width``, ``workerCost``, and
-        ``wallRemoveCost``; local tests may omit values and use defaults.
-
-    Returns
-    -------
-    dict[str, str]
-        Minimal ``{uid: action}`` dictionary for the controlled robots.
-
-    Notes
-    -----
-    This policy is diagnostic safety only.  It does not perform ISMCTS,
-    Determinization, Bitboard planning, or Rollouts.
-    """
-
-    actions = {}
-    width = _cfg(config, "width", 20)
-    player = _get(obs, "player", 0)
-    robots = _get(obs, "robots", {}) or {}
-    walls = _get(obs, "walls", []) or []
-    south_bound = _get(obs, "southBound", 0)
-
-    my_robots = {uid: data for uid, data in robots.items() if data[4] == player}
-    for uid, data in my_robots.items():
-        rtype, col, row, energy = data[0], data[1], data[2], data[3]
-        build_cd = data[7] if len(data) > 7 else 0
-        idx = (row - south_bound) * width + col
-        w = walls[idx] if 0 <= idx < len(walls) and walls[idx] != -1 else 0
-
-        if rtype == 0:
-            if w & 1:
-                actions[uid] = "JUMP_NORTH"
-            elif energy >= _cfg(config, "workerCost", 200) and build_cd == 0:
-                actions[uid] = "BUILD_WORKER"
-            else:
-                actions[uid] = "NORTH"
-        elif rtype == 2 and (w & 1) and energy >= _cfg(config, "wallRemoveCost", 100):
-            actions[uid] = "REMOVE_NORTH"
-        else:
-            passable = []
-            if not (w & 1):
-                passable.append("NORTH")
-            if not (w & 2):
-                passable.append("EAST")
-            if not (w & 4):
-                passable.append("SOUTH")
-            if not (w & 8):
-                passable.append("WEST")
-            actions[uid] = (
-                "NORTH"
-                if "NORTH" in passable
-                else (choice(passable) if passable else "IDLE")
-            )
-    return actions
+    """Return empty actions if the native engine is unavailable."""
+    return {}
 
 
 def agent(obs, config):
-    """Update the persistent native engine and return Kaggle actions.
+    """Kaggle-compatible agent entrypoint."""
 
-    Parameters
-    ----------
-    obs:
-        Kaggle observation object or dict.  Expected fields are:
-        ``player`` (``int``), ``step`` (``int``), ``southBound`` and
-        ``northBound`` (``int``), ``walls`` (flat length-400 sequence of wall
-        bitfields or ``-1``), ``crystals`` (``{"col,row": energy}``),
-        ``robots`` (``{"uid": [type, col, row, energy, owner, move_cd,
-        jump_cd, build_cd]}``), ``mines`` (``{"col,row": [energy, maxEnergy,
-        owner]}``), and ``miningNodes`` (``{"col,row": 1}``).
-    config:
-        Kaggle configuration object.  The native engine uses embedded constants
-        for the rule model; the Python fallback reads a small subset directly.
+    if not _ensure_native_engine():
+        return _fallback_agent(obs, config)
 
-    Returns
-    -------
-    dict[str, str]
-        Mapping from controlled robot UID to primitive action string.
-
-    Notes
-    -----
-    The C++ engine caches Belief State per player, then samples Determinizations
-    and runs fixed-arena ISMCTS under a 2000 ms search budget.
-    """
-
-    _ensure_native_engine()
     if crawler_engine is None:
         return _fallback_agent(obs, config)
 
@@ -354,7 +156,7 @@ def agent(obs, config):
     engine = _ENGINES.get(player)
     if engine is None:
         engine = crawler_engine.Engine(player)
-        engine.set_hyperparameters(BEST_PARAMS)
+        engine.set_hyperparameters(_CURRENT_PARAMS)
         _ENGINES[player] = engine
 
     step = int(_get(obs, "step", -1))

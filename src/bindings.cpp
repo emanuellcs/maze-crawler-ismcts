@@ -93,6 +93,14 @@ void apply_hyperparameter(crawler::Hyperparameters& hyperparameters, const std::
         hyperparameters.rollout_depth = depth;
         return;
     }
+    if (key == "search_threads") {
+        const int threads = py::cast<int>(value);
+        if (threads <= 0 || threads > 128) {
+            throw py::value_error("search_threads must be an integer in [1, 128]");
+        }
+        hyperparameters.search_threads = threads;
+        return;
+    }
 
     const double numeric_value = py::cast<double>(value);
     if (key == "C_puct") {
@@ -122,6 +130,7 @@ py::dict hyperparameters_to_dict(const crawler::Hyperparameters& hyperparameters
     out["C_puct"] = hyperparameters.C_puct;
     out["baseline_prior_multiplier"] = hyperparameters.baseline_prior_multiplier;
     out["rollout_depth"] = hyperparameters.rollout_depth;
+    out["search_threads"] = hyperparameters.search_threads;
     for (const crawler::MacroAction macro : HYPERPARAMETER_MACROS) {
         out[py::str(crawler::macro_action_name(macro))] = hyperparameters.prior_for(macro);
     }
@@ -366,6 +375,14 @@ public:
     }
 
     /**
+     * @brief Set the maximum number of search threads.
+     * @param n Maximum number of threads (must be >= 1).
+     */
+    void set_search_thread_limit(int n) {
+        engine.set_search_thread_limit(n);
+    }
+
+    /**
      * @brief Choose actions for the current observation.
      * @param time_budget_ms Search budget in milliseconds.
      * @param seed Deterministic root seed.
@@ -459,6 +476,7 @@ PYBIND11_MODULE(crawler_engine, m) {
              py::arg("northBound"), py::arg("step") = -1)
         .def("choose_actions", &PyEngine::choose_actions, py::arg("time_budget_ms") = 2000,
              py::arg("seed") = 0)
+        .def("set_search_thread_limit", &PyEngine::set_search_thread_limit, py::arg("n"))
         .def("set_hyperparameters", &PyEngine::set_hyperparameters, py::arg("params"))
         .def("get_hyperparameters", &PyEngine::get_hyperparameters)
         .def("step", &PyEngine::step, py::arg("actions"))
