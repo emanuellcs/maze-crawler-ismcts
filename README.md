@@ -20,12 +20,13 @@ The central engineering breakthrough is search-space compression. Maze Crawler i
 | Rule simulator | `src/crawler_engine_sim.cpp` | Executes Maze Crawler turn order exactly with fixed scratch arrays and deterministic state transitions. |
 | Policy and macros | `src/crawler_engine_policy.cpp` | Provides cooldown-aware pathfinding, rollout behavior, macro generation, and macro-to-primitive translation. |
 | Search | `src/crawler_engine_mcts.cpp` | Runs fixed-arena ISMCTS with PUCT selection, bounded joint macro expansion, rollout evaluation, and root action extraction. |
-| Tuning | `tune.py` | Runs process-parallel Optuna studies against `opponent.py`, persisted to SQLite and evaluated with side-swapped seeds. |
+| Tuning | `tune.py` | Runs process-parallel Optuna studies against `opponents/baseline.py`, persisted to SQLite and evaluated with side-swapped seeds. |
 | Packaging | `package_submission.py` | Produces a Kaggle source bundle with `main.py`, C++ sources, headers, and vendored pybind11 includes. |
 
 ## Why This Solution is Different
 
 - **Native hot path:** simulation, belief determinization, policy, and search run in C++20.
+- **Root-parallel ISMCTS:** search scales across multiple threads by aggregating root statistics from independent per-thread arenas.
 - **Zero-allocation search loop:** tree nodes, robots, board layers, action buffers, and rollout scratch structures are fixed-capacity `std::array` storage.
 - **Structure-of-Arrays robot store:** robot attributes live in separate contiguous arrays for predictable iteration and compact copy semantics.
 - **Active-window bitboards:** the 20x20 tactical window is rebuilt into `uint64_t` masks for occupancy, visibility, crystals, mines, and nodes.
@@ -72,7 +73,9 @@ Important mechanics implemented in the simulator include:
 .
 ├── CMakeLists.txt
 ├── main.py
-├── opponent.py
+├── opponents/
+│   ├── __init__.py
+│   └── baseline.py
 ├── package_submission.py
 ├── submission.py
 ├── test.py
@@ -191,7 +194,7 @@ sequenceDiagram
 
 ### Search Loop
 
-The search tree is an information-set tree. Nodes store UID-keyed joint macro plans, not simulator-local robot indices, so the same action history can be replayed across different hidden-state samples.
+The search tree is an information-set tree. When `search_threads > 1`, the engine runs multiple independent searches in parallel and aggregates their root visits and values to select the final action. Nodes store UID-keyed joint macro plans, not simulator-local robot indices, so the same action history can be replayed across different hidden-state samples.
 
 ```mermaid
 flowchart TD
@@ -485,53 +488,29 @@ The repository currently embeds the best available Optuna study parameters:
 
 ## Optimization and Tuning Pipeline
 
-`tune.py` performs Bayesian hyperparameter optimization against `opponent.py`, a strong Python benchmark policy. Each trial samples the C++ hyperparameter surface, injects the parameters into fresh `crawler_engine.Engine` instances, and evaluates the candidate over paired seeds with side swapping.
+`tune.py` performs Bayesian hyperparameter optimization against `opponents/baseline.py`, a strong Python benchmark policy. The tuner uses Optuna with a process-parallel `spawn` strategy to evaluate candidates over paired seeds with side swapping.
 
 ```mermaid
 flowchart TB
-    CLI["tune.py CLI<br/>trials, seeds, time budget, n_jobs"] --> Study["Optuna Study<br/>TPESampler + SQLite storage"]
-    Study --> Ask["study.ask()"]
-    Ask --> Sample["suggest_hyperparameters()<br/>C_puct, rollout depth, macro priors"]
-    Sample --> Pool["ProcessPoolExecutor"]
-
-    subgraph Worker["Worker Process"]
-        Candidate["CandidateAgent<br/>fresh C++ Engine per player"]
-        Opponent["opponent.py<br/>benchmark policy"]
-        Env0["Kaggle env seed s<br/>candidate as player 0"]
-        Env1["Kaggle env seed s<br/>candidate as player 1"]
-        Score["Energy margin<br/>candidate_energy - opponent_energy"]
-    end
-
-    Pool --> Candidate
-    Pool --> Opponent
-    Candidate --> Env0
-    Opponent --> Env0
-    Candidate --> Env1
-    Opponent --> Env1
-    Env0 --> Score
-    Env1 --> Score
-    Score --> Tell["study.tell(trial, mean_margin)"]
-    Tell --> Study
+    CLI["tune.py CLI<br/>trials, n_jobs, seeds, budget"] --> Study["Optuna Study<br/>TPESampler + SQLite storage"]
+    Study --> Parallel["Parallel Trials<br/>n_jobs workers"]
+    Parallel --> Worker["Worker Process<br/>spawned for clean state"]
+    Worker --> Match["run_match()<br/>paired seeds + side-swap"]
+    Match --> Score["Win rate + Energy margin"]
+    Score --> Tell["study.tell()"]
 ```
 
-The objective is:
+The objective function maximizes a composite score:
 
 ```math
-J(\theta) =
-\frac{1}{2S}
-\sum_{s=1}^{S}
-\left[
-\Delta E(\theta, s, \text{player}=0)
-+
-\Delta E(\theta, s, \text{player}=1)
-\right]
+J(\theta) = \text{WinRate} + \frac{\text{AvgMargin}}{10000}
 ```
 
-where $`\Delta E`$ is final candidate energy minus final opponent energy, read from each player's own final observation to avoid fog-of-war bias.
+where win rate is primary and energy margin provides a continuous gradient for the optimizer.
 
 Key properties:
 
-- Uses Optuna `ask`/`tell` with `ProcessPoolExecutor`, not shared mutable thread state.
+- Uses Optuna `ask`/`tell` with process-parallel evaluation using `spawn` for clean native state.
 - Persists studies to SQLite by default: `sqlite:///tune.db`.
 - Enqueues the repository default parameter set as a baseline trial.
 - Marks import, compile, timeout, invalid-action, or agent errors as failed trials without killing the study.
