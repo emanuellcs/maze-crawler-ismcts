@@ -6,7 +6,7 @@
  *
  * This module supplies the baseline plan used outside search, the rollout policy
  * used inside ISMCTS, and the macro-to-primitive translator used by tree edges.
- * It mirrors the strategic shape of `opponent.py` while keeping every scratch
+ * It mirrors the strategic shape of `opponents/baseline.py` while keeping every scratch
  * structure in fixed arrays so Rollouts stay allocation-free.
  */
 
