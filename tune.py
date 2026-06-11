@@ -59,6 +59,7 @@ class EvalConfig:
     seeds: int
     base_seed: int
     time_budget_ms: int
+    timeout_per_match: float
     debug: bool
 
 def _get(obj: Any, name: str, default: Any = None) -> Any:
@@ -87,7 +88,15 @@ def run_match(seed: int, candidate_player: int, config: EvalConfig) -> tuple[flo
     agents[opponent_player] = baseline_opponent.agent
 
     env = make("crawl", configuration={"randomSeed": seed}, debug=config.debug)
-    steps = env.run(agents)
+    
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(env.run, agents)
+            steps = future.result(timeout=config.timeout_per_match)
+    except concurrent.futures.TimeoutError:
+        LOGGER.warning(f"Match timed out after {config.timeout_per_match}s (seed={seed})")
+        return 0.0, -10000.0
+
     final = steps[-1]
 
     if _state_failed(final[candidate_player]):
@@ -153,6 +162,7 @@ def main_cli():
     parser.add_argument("--storage", default="sqlite:///tune.db")
     parser.add_argument("--study-name", default="crawl-vs-opponent")
     parser.add_argument("--base-seed", type=int, default=42)
+    parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -162,6 +172,7 @@ def main_cli():
         seeds=args.seeds,
         base_seed=args.base_seed,
         time_budget_ms=args.time_budget,
+        timeout_per_match=args.timeout,
         debug=args.debug
     )
 
