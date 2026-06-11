@@ -22,6 +22,7 @@ from typing import Any, Callable
 multiprocessing.set_start_method("spawn", force=True)
 
 import optuna
+from optuna.storages import RDBStorage
 from kaggle_environments import make
 
 # Add the root to sys.path so we can import main and opponents.
@@ -176,10 +177,15 @@ def main_cli():
         debug=args.debug
     )
 
+    db_storage = RDBStorage(
+        url=args.storage,
+        engine_kwargs={"connect_args": {"timeout": 60.0}}
+    )
+
     study = optuna.create_study(
         direction="maximize",
         study_name=args.study_name,
-        storage=args.storage,
+        storage=db_storage,
         load_if_exists=True
     )
     
