@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from concurrent.futures.process import BrokenProcessPool
 import logging
 import multiprocessing
 import os
@@ -210,33 +211,54 @@ def main_cli():
         LOGGER.info(f"Started tuning with {args.n_jobs} workers. Total trials: {args.trials}")
 
         # Ask-and-tell loop
-        while futures:
-            done, _ = concurrent.futures.wait(
-                futures.keys(), 
-                return_when=concurrent.futures.FIRST_COMPLETED
-            )
-            
-            for future in done:
-                trial = futures.pop(future)
-                try:
-                    value = future.result()
-                    if value == FAIL_SCORE:
-                        study.tell(trial, value, state=optuna.trial.TrialState.FAIL)
-                    else:
-                        study.tell(trial, value)
-                    
-                    LOGGER.info(f"Trial {trial.number} finished with value: {value:.4f}")
-                except Exception as e:
-                    LOGGER.error(f"Trial {trial.number} raised exception: {e}")
-                    study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+        try:
+            while futures:
+                done, _ = concurrent.futures.wait(
+                    futures.keys(), 
+                    return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                
+                should_break = False
+                for future in done:
+                    trial = futures.pop(future)
+                    try:
+                        value = future.result()
+                        if value == FAIL_SCORE:
+                            study.tell(trial, value, state=optuna.trial.TrialState.FAIL)
+                        else:
+                            study.tell(trial, value)
+                        
+                        LOGGER.info(f"Trial {trial.number} finished with value: {value:.4f}")
+                    except BrokenProcessPool:
+                        LOGGER.critical("Process pool broken (worker segfault or OOM). Failing trial and stopping.")
+                        study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+                        should_break = True
+                    except Exception as e:
+                        LOGGER.error(f"Trial {trial.number} raised exception: {e}")
+                        study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
 
-                # Submit next trial if needed
-                if trials_to_submit > 0:
-                    next_trial = study.ask()
-                    next_hp = sample_hyperparameters(next_trial)
-                    next_future = executor.submit(evaluate_hp, next_hp, config)
-                    futures[next_future] = next_trial
-                    trials_to_submit -= 1
+                    # Submit next trial if needed
+                    if not should_break and trials_to_submit > 0:
+                        next_trial = study.ask()
+                        next_hp = sample_hyperparameters(next_trial)
+                        next_future = executor.submit(evaluate_hp, next_hp, config)
+                        futures[next_future] = next_trial
+                        trials_to_submit -= 1
+                
+                if should_break:
+                    break
+        except KeyboardInterrupt:
+            LOGGER.warning("Tuning interrupted by user (KeyboardInterrupt).")
+        finally:
+            # Cleanup stranded trials.
+            if futures:
+                LOGGER.info(f"Cleaning up {len(futures)} stranded trials...")
+                for trial in list(futures.values()):
+                    try:
+                        study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+                    except Exception as e:
+                        LOGGER.error(f"Failed to mark trial {trial.number} as failed: {e}")
+                futures.clear()
 
     if study.best_trial:
         print(f"Best trial: {study.best_trial.number}")
