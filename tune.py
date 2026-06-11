@@ -8,6 +8,7 @@ benchmark policy using side-swapped seeds to reduce variance.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import multiprocessing
 import os
@@ -105,8 +106,8 @@ def run_match(seed: int, candidate_player: int, config: EvalConfig) -> tuple[flo
     
     return win_score, margin
 
-def objective(trial: optuna.trial.Trial, config: EvalConfig) -> float:
-    """Sample parameters and return composite score."""
+def sample_hyperparameters(trial: optuna.trial.Trial) -> dict[str, Any]:
+    """Sample hyperparameters from the trial."""
     hp = {
         "C_puct": trial.suggest_float("C_puct", 0.5, 3.0),
         "baseline_prior_multiplier": trial.suggest_float("baseline_prior_multiplier", 0.75, 2.0),
@@ -116,7 +117,10 @@ def objective(trial: optuna.trial.Trial, config: EvalConfig) -> float:
     for key in MACRO_PRIOR_KEYS:
         low, high = (0.05, 0.75) if key == "IDLE" else (0.25, 2.5)
         hp[key] = trial.suggest_float(key, low, high)
+    return hp
 
+def evaluate_hp(hp: dict[str, Any], config: EvalConfig) -> float:
+    """Evaluate a set of hyperparameters in a worker process."""
     # Apply parameters and clear cache in this worker process.
     main.set_hyperparameters(**hp)
 
@@ -137,7 +141,7 @@ def objective(trial: optuna.trial.Trial, config: EvalConfig) -> float:
         # Composite score: win rate is primary, margin provides continuous gradient.
         return avg_win_rate + (avg_margin / 10000.0)
     except Exception:
-        LOGGER.error(f"Trial {trial.number} crashed:\n{traceback.format_exc()}")
+        LOGGER.error(f"Evaluation failed:\n{traceback.format_exc()}")
         return FAIL_SCORE
 
 def main_cli():
@@ -172,7 +176,50 @@ def main_cli():
     if len(study.trials) == 0:
         study.enqueue_trial(main.BEST_PARAMS)
 
-    study.optimize(lambda t: objective(t, config), n_trials=args.trials, n_jobs=args.n_jobs)
+    futures: dict[concurrent.futures.Future, optuna.trial.Trial] = {}
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.n_jobs) as executor:
+        # Initial fill
+        trials_to_submit = args.trials
+        initial_batch = min(args.n_jobs, trials_to_submit)
+        
+        for _ in range(initial_batch):
+            trial = study.ask()
+            hp = sample_hyperparameters(trial)
+            future = executor.submit(evaluate_hp, hp, config)
+            futures[future] = trial
+            trials_to_submit -= 1
+            
+        LOGGER.info(f"Started tuning with {args.n_jobs} workers. Total trials: {args.trials}")
+
+        # Ask-and-tell loop
+        while futures:
+            done, _ = concurrent.futures.wait(
+                futures.keys(), 
+                return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            
+            for future in done:
+                trial = futures.pop(future)
+                try:
+                    value = future.result()
+                    if value == FAIL_SCORE:
+                        study.tell(trial, value, state=optuna.trial.TrialState.FAIL)
+                    else:
+                        study.tell(trial, value)
+                    
+                    LOGGER.info(f"Trial {trial.number} finished with value: {value:.4f}")
+                except Exception as e:
+                    LOGGER.error(f"Trial {trial.number} raised exception: {e}")
+                    study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+
+                # Submit next trial if needed
+                if trials_to_submit > 0:
+                    next_trial = study.ask()
+                    next_hp = sample_hyperparameters(next_trial)
+                    next_future = executor.submit(evaluate_hp, next_hp, config)
+                    futures[next_future] = next_trial
+                    trials_to_submit -= 1
 
     if study.best_trial:
         print(f"Best trial: {study.best_trial.number}")
