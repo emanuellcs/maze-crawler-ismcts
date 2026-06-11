@@ -510,7 +510,8 @@ where win rate is primary and energy margin provides a continuous gradient for t
 
 Key properties:
 
-- Uses Optuna `ask`/`tell` with process-parallel evaluation using `spawn` for clean native state.
+- Uses Optuna `ask`/`tell` with process-parallel evaluation using `ProcessPoolExecutor` and the `spawn` start method for clean native state.
+- Bypasses the Python Global Interpreter Lock (GIL) to enable true multi-core speedup during tuning.
 - Persists studies to SQLite by default: `sqlite:///tune.db`.
 - Enqueues the repository default parameter set as a baseline trial.
 - Marks import, compile, timeout, invalid-action, or agent errors as failed trials without killing the study.
