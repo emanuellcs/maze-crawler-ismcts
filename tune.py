@@ -260,10 +260,13 @@ def main_cli():
                         LOGGER.error(f"Failed to mark trial {trial.number} as failed: {e}")
                 futures.clear()
 
-    if study.best_trial:
-        print(f"Best trial: {study.best_trial.number}")
-        print(f"  Value: {study.best_trial.value}")
-        print(f"  Params: {study.best_trial.params}")
+    try:
+        best = study.best_trial
+        print(f"Best trial: {best.number}")
+        print(f"  Value: {best.value}")
+        print(f"  Params: {best.params}")
+    except ValueError:
+        print("No successful trials completed. Check worker logs for errors.")
 
 if __name__ == "__main__":
     main_cli()
