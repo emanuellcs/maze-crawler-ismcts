@@ -511,8 +511,10 @@ where win rate is primary and energy margin provides a continuous gradient for t
 Key properties:
 
 - Uses Optuna `ask`/`tell` with process-parallel evaluation using `ProcessPoolExecutor` and the `spawn` start method for clean native state.
+- **Robust Error Handling:** Gracefully handles `KeyboardInterrupt`, `BrokenProcessPool` (worker segfaults/OOM), and `TimeoutError` to prevent "zombie" trials in the database.
+- **Configurable Timeout:** Supports a strict wall-clock `--timeout` per match to prevent hung workers from deadlocking the study.
 - Bypasses the Python Global Interpreter Lock (GIL) to enable true multi-core speedup during tuning.
-- Persists studies to SQLite by default: `sqlite:///tune.db`.
+- Persists studies to SQLite by default: `sqlite:///tune.db` with an increased busy timeout (60s) to mitigate lock contention.
 - Enqueues the repository default parameter set as a baseline trial.
 - Marks import, compile, timeout, invalid-action, or agent errors as failed trials without killing the study.
 - Supports local smoke tuning as well as long production studies.
@@ -601,6 +603,7 @@ PYTHONPATH=build python tune.py \
   --n-jobs 1 \
   --seeds 1 \
   --time-budget 10 \
+  --timeout 30.0 \
   --storage sqlite:////tmp/maze-crawler-opponent-smoke.db \
   --study-name opponent-smoke
 ```
@@ -613,6 +616,7 @@ PYTHONPATH=build python tune.py \
   --n-jobs 16 \
   --seeds 5 \
   --time-budget 300 \
+  --timeout 60.0 \
   --storage sqlite:///tune.db \
   --study-name crawl-vs-opponent
 ```

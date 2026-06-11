@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from concurrent.futures.process import BrokenProcessPool
 import logging
 import multiprocessing
 import os
@@ -22,6 +23,7 @@ from typing import Any, Callable
 multiprocessing.set_start_method("spawn", force=True)
 
 import optuna
+from optuna.storages import RDBStorage
 from kaggle_environments import make
 
 # Add the root to sys.path so we can import main and opponents.
@@ -59,6 +61,7 @@ class EvalConfig:
     seeds: int
     base_seed: int
     time_budget_ms: int
+    timeout_per_match: float
     debug: bool
 
 def _get(obj: Any, name: str, default: Any = None) -> Any:
@@ -87,7 +90,15 @@ def run_match(seed: int, candidate_player: int, config: EvalConfig) -> tuple[flo
     agents[opponent_player] = baseline_opponent.agent
 
     env = make("crawl", configuration={"randomSeed": seed}, debug=config.debug)
-    steps = env.run(agents)
+    
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(env.run, agents)
+            steps = future.result(timeout=config.timeout_per_match)
+    except concurrent.futures.TimeoutError:
+        LOGGER.warning(f"Match timed out after {config.timeout_per_match}s (seed={seed})")
+        return 0.0, -10000.0
+
     final = steps[-1]
 
     if _state_failed(final[candidate_player]):
@@ -153,6 +164,7 @@ def main_cli():
     parser.add_argument("--storage", default="sqlite:///tune.db")
     parser.add_argument("--study-name", default="crawl-vs-opponent")
     parser.add_argument("--base-seed", type=int, default=42)
+    parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -162,13 +174,19 @@ def main_cli():
         seeds=args.seeds,
         base_seed=args.base_seed,
         time_budget_ms=args.time_budget,
+        timeout_per_match=args.timeout,
         debug=args.debug
+    )
+
+    db_storage = RDBStorage(
+        url=args.storage,
+        engine_kwargs={"connect_args": {"timeout": 60.0}}
     )
 
     study = optuna.create_study(
         direction="maximize",
         study_name=args.study_name,
-        storage=args.storage,
+        storage=db_storage,
         load_if_exists=True
     )
     
@@ -193,38 +211,62 @@ def main_cli():
         LOGGER.info(f"Started tuning with {args.n_jobs} workers. Total trials: {args.trials}")
 
         # Ask-and-tell loop
-        while futures:
-            done, _ = concurrent.futures.wait(
-                futures.keys(), 
-                return_when=concurrent.futures.FIRST_COMPLETED
-            )
-            
-            for future in done:
-                trial = futures.pop(future)
-                try:
-                    value = future.result()
-                    if value == FAIL_SCORE:
-                        study.tell(trial, value, state=optuna.trial.TrialState.FAIL)
-                    else:
-                        study.tell(trial, value)
-                    
-                    LOGGER.info(f"Trial {trial.number} finished with value: {value:.4f}")
-                except Exception as e:
-                    LOGGER.error(f"Trial {trial.number} raised exception: {e}")
-                    study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+        try:
+            while futures:
+                done, _ = concurrent.futures.wait(
+                    futures.keys(), 
+                    return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                
+                should_break = False
+                for future in done:
+                    trial = futures.pop(future)
+                    try:
+                        value = future.result()
+                        if value == FAIL_SCORE:
+                            study.tell(trial, value, state=optuna.trial.TrialState.FAIL)
+                        else:
+                            study.tell(trial, value)
+                        
+                        LOGGER.info(f"Trial {trial.number} finished with value: {value:.4f}")
+                    except BrokenProcessPool:
+                        LOGGER.critical("Process pool broken (worker segfault or OOM). Failing trial and stopping.")
+                        study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+                        should_break = True
+                    except Exception as e:
+                        LOGGER.error(f"Trial {trial.number} raised exception: {e}")
+                        study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
 
-                # Submit next trial if needed
-                if trials_to_submit > 0:
-                    next_trial = study.ask()
-                    next_hp = sample_hyperparameters(next_trial)
-                    next_future = executor.submit(evaluate_hp, next_hp, config)
-                    futures[next_future] = next_trial
-                    trials_to_submit -= 1
+                    # Submit next trial if needed
+                    if not should_break and trials_to_submit > 0:
+                        next_trial = study.ask()
+                        next_hp = sample_hyperparameters(next_trial)
+                        next_future = executor.submit(evaluate_hp, next_hp, config)
+                        futures[next_future] = next_trial
+                        trials_to_submit -= 1
+                
+                if should_break:
+                    break
+        except KeyboardInterrupt:
+            LOGGER.warning("Tuning interrupted by user (KeyboardInterrupt).")
+        finally:
+            # Cleanup stranded trials.
+            if futures:
+                LOGGER.info(f"Cleaning up {len(futures)} stranded trials...")
+                for trial in list(futures.values()):
+                    try:
+                        study.tell(trial, FAIL_SCORE, state=optuna.trial.TrialState.FAIL)
+                    except Exception as e:
+                        LOGGER.error(f"Failed to mark trial {trial.number} as failed: {e}")
+                futures.clear()
 
-    if study.best_trial:
-        print(f"Best trial: {study.best_trial.number}")
-        print(f"  Value: {study.best_trial.value}")
-        print(f"  Params: {study.best_trial.params}")
+    try:
+        best = study.best_trial
+        print(f"Best trial: {best.number}")
+        print(f"  Value: {best.value}")
+        print(f"  Params: {best.params}")
+    except ValueError:
+        print("No successful trials completed. Check worker logs for errors.")
 
 if __name__ == "__main__":
     main_cli()
