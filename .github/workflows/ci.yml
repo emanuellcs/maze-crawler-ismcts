@@ -74,11 +74,17 @@ jobs:
       - name: Build C++ extension
         run: cmake --build build -j"$(nproc)"
 
-      - name: Run smoke script
-        run: PYTHONPATH=build python test.py
-
       - name: Run pytest suite
-        run: PYTHONPATH=build python -m pytest -q test.py
+        run: PYTHONPATH=build python -m pytest -q tests
+
+      - name: Run differential rules-fidelity check
+        run: PYTHONPATH=build python scripts/diffcheck.py --games 2 --steps 40 --budget-ms 60
+
+      - name: Run benchmark smoke
+        run: PYTHONPATH=build python scripts/bench.py --seeds 2 --base-seed 7000 --budget-ms 80 --max-steps 40 --timeout 60
+
+      - name: Run profiling perf gate
+        run: PYTHONPATH=build python scripts/profiling.py --calls 20 --budget-ms 50 --max-p95 150
 
       - name: Verify Kaggle entrypoint imports
         run: |
@@ -116,6 +122,29 @@ jobs:
             build/compile_commands.json
           if-no-files-found: error
           retention-days: 14
+
+  sanitize:
+    name: ASan/UBSan build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Configure sanitizer build
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+            -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build sanitizer extension
+        run: cmake --build build-asan -j"$(nproc)"
+      - name: Run tests under sanitizers
+        run: PYTHONPATH=build-asan ASAN_OPTIONS=detect_leaks=0 python -m pytest -q tests
 
   package:
     name: Package source bundle
