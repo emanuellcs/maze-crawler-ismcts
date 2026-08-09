@@ -47,16 +47,16 @@ find_package(pybind11 CONFIG REQUIRED)
 # fixed-buffer state, internal helpers, facade, and pybind conversion.
 pybind11_add_module(crawler_engine
   src/crawler_engine_belief.cpp
+  src/crawler_engine_bindings.cpp
   src/crawler_engine_engine.cpp
   src/crawler_engine_internal.cpp
   src/crawler_engine_mcts.cpp
   src/crawler_engine_policy.cpp
   src/crawler_engine_sim.cpp
   src/crawler_engine_state.cpp
-  src/bindings.cpp
 )
 
-target_include_directories(crawler_engine PRIVATE src)
+target_include_directories(crawler_engine PRIVATE src/include src)
 
 # Warnings stay enabled in every config to catch narrowing or rule-drift bugs.
 # Release builds use `-O3` plus `-march=native` so local/CI binaries can exploit

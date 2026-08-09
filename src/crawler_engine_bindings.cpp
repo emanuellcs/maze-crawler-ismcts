@@ -1,16 +1,5 @@
 #include "crawler_engine.hpp"
 
-/**
- * @file bindings.cpp
- * @brief pybind11 bridge between Kaggle dictionaries and the fixed-buffer C++ engine.
- *
- * This file is the only Python/C++ translation boundary.  It decodes sparse
- * Python observation dictionaries into `ObservationInput`, exposes runtime
- * hyperparameters, and serializes `ActionResult` back to `{uid: action}`.  It
- * deliberately contains no simulator, policy, or ISMCTS logic so the native hot
- * path remains testable without Python objects.
- */
-
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -491,3 +480,4 @@ PYBIND11_MODULE(crawler_engine, m) {
         return std::string(crawler::macro_action_name(static_cast<crawler::MacroAction>(macro)));
     });
 }
+
