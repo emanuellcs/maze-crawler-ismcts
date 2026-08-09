@@ -144,7 +144,10 @@ jobs:
       - name: Build sanitizer extension
         run: cmake --build build-asan -j"$(nproc)"
       - name: Run tests under sanitizers
-        run: PYTHONPATH=build-asan ASAN_OPTIONS=detect_leaks=0 python -m pytest -q tests
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)"
+          PYTHONPATH=build-asan python -m pytest -q tests
 
   package:
     name: Package source bundle
