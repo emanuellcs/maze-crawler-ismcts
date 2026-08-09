@@ -1,15 +1,5 @@
 #include "crawler_engine.hpp"
 
-/**
- * @file crawler_engine_engine.cpp
- * @brief High-level Engine facade wiring belief, simulation, and ISMCTS search.
- *
- * The Python bridge owns one Engine per player.  This module keeps that facade
- * intentionally thin: observations update the Belief State first, then rebuild
- * the latest concrete simulator snapshot, and action selection samples hidden
- * worlds from that belief through fixed-arena ISMCTS.
- */
-
 namespace crawler {
 
 /**
@@ -114,6 +104,13 @@ void Engine::set_search_thread_limit(int n) {
 BoardState Engine::determinize(uint64_t seed) const {
     BoardState sampled = belief.determinize(seed);
     sampled.scroll_counter = sim.state.scroll_counter;
+    struct EnemyRef {
+        uint8_t type;
+        int col;
+        int row;
+    };
+    std::array<EnemyRef, MAX_ROBOTS> enemies{};
+    int enemy_count = 0;
     for (int i = 0; i < sim.state.robots.used; ++i) {
         if (sim.state.robots.alive[static_cast<size_t>(i)] == 0) {
             continue;
@@ -128,9 +125,37 @@ BoardState Engine::determinize(uint64_t seed) const {
                                                   sim.state.robots.jump_cd[static_cast<size_t>(i)],
                                                   sim.state.robots.build_cd[static_cast<size_t>(i)]);
         (void)slot;
+        if (sim.state.robots.owner[static_cast<size_t>(i)] != sim.state.player &&
+            enemy_count < static_cast<int>(enemies.size())) {
+            enemies[static_cast<size_t>(enemy_count++)] = EnemyRef{
+                sim.state.robots.type[static_cast<size_t>(i)],
+                sim.state.robots.col[static_cast<size_t>(i)],
+                sim.state.robots.row[static_cast<size_t>(i)],
+            };
+        }
+    }
+    /* Safety net: BeliefState::determinize already refuses to sample hidden
+     * enemies on observed cells, but drop any generated enemy that still lands
+     * on one so vision-model drift can never double a visible unit. */
+    for (int i = 0; i < sampled.robots.used; ++i) {
+        if (sampled.robots.alive[static_cast<size_t>(i)] == 0 ||
+            sampled.robots.uid[static_cast<size_t>(i)][0] != 's' ||
+            sampled.robots.uid[static_cast<size_t>(i)][1] != 'i' ||
+            sampled.robots.uid[static_cast<size_t>(i)][2] != 'm') {
+            continue;
+        }
+        for (int e = 0; e < enemy_count; ++e) {
+            if (sampled.robots.type[static_cast<size_t>(i)] == enemies[static_cast<size_t>(e)].type &&
+                sampled.robots.col[static_cast<size_t>(i)] == enemies[static_cast<size_t>(e)].col &&
+                sampled.robots.row[static_cast<size_t>(i)] == enemies[static_cast<size_t>(e)].row) {
+                sampled.robots.remove(i);
+                break;
+            }
+        }
     }
     sampled.rebuild_active_bitboards();
     return sampled;
 }
 
 }  // namespace crawler
+

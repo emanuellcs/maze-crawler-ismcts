@@ -1,16 +1,5 @@
 #include "crawler_engine_internal.hpp"
 
-/**
- * @file crawler_engine_internal.cpp
- * @brief Shared deterministic primitives for Maze Crawler simulation and ISMCTS.
- *
- * The helpers in this file deliberately avoid policy and search decisions.
- * They provide the reproducible randomization, coordinate math, reciprocal wall
- * maintenance, scroll reconstruction, and optimistic row generation required by
- * both Belief State Determinization and the deterministic simulator.  Centralizing
- * these operations keeps the rule engine, Rollouts, and pybind debug paths aligned.
- */
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -304,3 +293,4 @@ void generate_optimistic_row(BoardState& state, int row, uint64_t seed) {
 }
 
 }  // namespace crawler::detail
+

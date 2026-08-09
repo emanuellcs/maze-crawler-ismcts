@@ -1,16 +1,5 @@
 #pragma once
 
-/**
- * @file crawler_engine_internal.hpp
- * @brief Internal deterministic helper API shared by simulation, belief, policy, and ISMCTS.
- *
- * This header contains low-level primitives that are intentionally not exposed
- * through pybind.  The functions here support deterministic Determinization,
- * active-window Bitboard indexing, reciprocal wall maintenance, and synthetic
- * row generation.  Keeping these helpers centralized prevents each engine
- * module from inventing subtly different coordinate or randomization rules.
- */
-
 #include "crawler_engine.hpp"
 
 #include <array>
@@ -105,3 +94,4 @@ void set_or_clear_wall(BoardState& state, int c, int r, Direction direction, boo
 void generate_optimistic_row(BoardState& state, int row, uint64_t seed);
 
 }  // namespace crawler::detail
+

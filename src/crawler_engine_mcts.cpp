@@ -1,17 +1,5 @@
 #include "crawler_engine_internal.hpp"
 
-/**
- * @file crawler_engine_mcts.cpp
- * @brief Fixed-arena Information Set Monte Carlo Tree Search over joint macro plans.
- *
- * The tree is an information-set search: each iteration samples a concrete
- * BoardState from the Belief State, replays the selected UID-keyed macro history
- * through that Determinization, performs deterministic Rollouts, and
- * backpropagates a root-player value.  Expansion is bounded by a deterministic
- * baseline joint plan plus one-robot MacroAction deviations, avoiding the
- * primitive simultaneous-action Cartesian product.
- */
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -49,6 +37,8 @@ struct EvalStats {
     std::array<int, 2> material{0, 0};
     std::array<int, 2> factories{0, 0};
     std::array<int, 2> best_factory_row{0, 0};
+    std::array<int, 2> factory_col{0, 0};
+    std::array<int, 2> mines{0, 0};
 };
 
 /**
@@ -339,6 +329,16 @@ float evaluate_state(const BoardState& state, int root_player) {
             stats.best_factory_row[static_cast<size_t>(owner)] =
                 std::max(stats.best_factory_row[static_cast<size_t>(owner)],
                          static_cast<int>(state.robots.row[static_cast<size_t>(i)]));
+            stats.factory_col[static_cast<size_t>(owner)] =
+                state.robots.col[static_cast<size_t>(i)];
+        }
+    }
+
+    for (int idx = 0; idx < MAX_CELLS; ++idx) {
+        const int mine_owner = state.mine_owner[static_cast<size_t>(idx)];
+        if (mine_owner >= 0 && mine_owner <= 1 &&
+            state.mine_energy[static_cast<size_t>(idx)] > 0) {
+            ++stats.mines[static_cast<size_t>(mine_owner)];
         }
     }
 
@@ -348,7 +348,7 @@ float evaluate_state(const BoardState& state, int root_player) {
                           stats.units[static_cast<size_t>(opponent)];
     const bool root_dead = stats.factories[static_cast<size_t>(root_player)] == 0;
     const bool opponent_dead = stats.factories[static_cast<size_t>(opponent)] == 0;
-    const bool tiebreak_terminal = (state.done && root_dead == opponent_dead) || state.step >= EPISODE_STEPS - 1;
+    const bool tiebreak_terminal = (state.done && root_dead == opponent_dead) || state.step >= EPISODE_STEPS - 2;
     if (tiebreak_terminal) {
         if (energy_diff != 0) {
             return std::clamp(std::tanh(static_cast<float>(energy_diff) / 800.0F), -1.0F, 1.0F);
@@ -378,9 +378,25 @@ float evaluate_state(const BoardState& state, int root_player) {
     const float margin_score =
         std::tanh(static_cast<float>((stats.best_factory_row[static_cast<size_t>(root_player)] - state.south_bound) -
                                      (stats.best_factory_row[static_cast<size_t>(opponent)] - state.south_bound)) / 8.0F);
+    const float mine_score =
+        std::tanh(static_cast<float>(stats.mines[static_cast<size_t>(root_player)] -
+                                     stats.mines[static_cast<size_t>(opponent)]) * 0.5F);
 
-    return std::clamp(0.55F * energy_score + 0.20F * material_score + 0.10F * unit_score +
-                          0.10F * progress_score + 0.05F * margin_score,
+    /* Factory-proximity threat: when the enemy factory is close, a mutual
+     * factory collision becomes a real risk and the tiebreak decides. */
+    float factory_threat = 0.0F;
+    if (stats.factories[static_cast<size_t>(root_player)] > 0 &&
+        stats.factories[static_cast<size_t>(opponent)] > 0) {
+        const int dist = std::abs(stats.factory_col[static_cast<size_t>(root_player)] -
+                                  stats.factory_col[static_cast<size_t>(opponent)]) +
+                         std::abs(stats.best_factory_row[static_cast<size_t>(root_player)] -
+                                  stats.best_factory_row[static_cast<size_t>(opponent)]);
+        factory_threat = std::clamp((14.0F - static_cast<float>(dist)) / 14.0F, 0.0F, 1.0F);
+    }
+
+    return std::clamp(0.50F * energy_score + 0.20F * material_score + 0.10F * unit_score +
+                          0.10F * progress_score + 0.05F * margin_score + 0.05F * mine_score -
+                          0.05F * factory_threat,
                       -1.0F, 1.0F);
 }
 
@@ -521,6 +537,8 @@ int MCTSArena::create_node(int parent, int depth, float prior) {
     node.value_sum = 0.0F;
     node.prior = prior;
     node.expanded = 0;
+    node.plan_uid = {};
+    node.plan_macro.fill(MACRO_IDLE);
     return index;
 }
 
@@ -620,6 +638,7 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
     /* Aggregate root children from all arenas. */
     struct AggregatedChild {
         std::array<MacroAction, MAX_MCTS_PLAN_ROBOTS> macro{};
+        int plan_count = 0;
         int visits = 0;
         float value_sum = 0.0F;
         int arena_idx = -1;
@@ -637,11 +656,11 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
 
             bool found = false;
             for (auto& agg : aggregated) {
-                bool match = true;
-                if (node.plan_count != static_cast<int>(MAX_MCTS_PLAN_ROBOTS)) {
-                    /* If plan_count varies, we'd need to compare it too. But it's fixed in Engine::choose_actions. */
+                if (node.plan_count != agg.plan_count) {
+                    continue;
                 }
-                for (int m = 0; m < MAX_MCTS_PLAN_ROBOTS; ++m) {
+                bool match = true;
+                for (int m = 0; m < node.plan_count; ++m) {
                     if (node.plan_macro[static_cast<size_t>(m)] != agg.macro[static_cast<size_t>(m)]) {
                         match = false;
                         break;
@@ -657,7 +676,8 @@ ActionResult Engine::choose_actions(int time_budget_ms, uint64_t seed) {
 
             if (!found) {
                 AggregatedChild agg{};
-                for (int m = 0; m < MAX_MCTS_PLAN_ROBOTS; ++m) {
+                agg.plan_count = node.plan_count;
+                for (int m = 0; m < node.plan_count; ++m) {
                     agg.macro[static_cast<size_t>(m)] = node.plan_macro[static_cast<size_t>(m)];
                 }
                 agg.visits = node.visits;
@@ -706,3 +726,4 @@ float Engine::debug_mcts_value(int player) const {
 }
 
 }  // namespace crawler
+

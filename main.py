@@ -6,6 +6,7 @@ sparse Kaggle observations into dense native buffers, and execute ISMCTS
 within the rule-defined time budget.
 """
 
+import json
 import logging
 import os
 import shutil
@@ -24,37 +25,41 @@ except ImportError:
 _ENGINES = {}
 _JIT_ATTEMPTED = False
 _ROOT = Path(__file__).resolve().parent
-BEST_PARAMS = {
-    "C_puct": 2.0884330868271443,
-    "baseline_prior_multiplier": 1.8863044112273712,
-    "rollout_depth": 80,
-    "IDLE": 0.49504719444108913,
-    "FACTORY_SUPPORT_WORKER": 1.0390992283842135,
-    "FACTORY_SAFE_ADVANCE": 2.161864767112469,
-    "FACTORY_BUILD_WORKER": 0.997532683560502,
-    "FACTORY_BUILD_SCOUT": 1.8649154683704814,
-    "FACTORY_BUILD_MINER": 0.8269752415957998,
-    "FACTORY_JUMP_OBSTACLE": 1.4925105256980329,
-    "WORKER_OPEN_NORTH_WALL": 0.7351332485632837,
-    "WORKER_ESCORT_FACTORY": 1.583596636264722,
-    "WORKER_ADVANCE": 0.8874633406271473,
-    "SCOUT_HUNT_CRYSTAL": 1.083268581072123,
-    "SCOUT_EXPLORE_NORTH": 1.6851712172373043,
-    "SCOUT_RETURN_ENERGY": 1.1040824358243229,
-    "MINER_SEEK_NODE": 0.6983213636231111,
-    "MINER_TRANSFORM": 0.5309500821275892,
-}
+
+
+def _load_champion():
+    """Load the tuned champion parameters from the single source of truth.
+
+    ``config/hyperparameters.json`` is authoritative.  If it is missing (for
+    example during a bare checkout or in tests), an empty set is returned and
+    the native engine falls back to its compiled-in defaults.
+    """
+    try:
+        data = json.loads((_ROOT / "config" / "hyperparameters.json").read_text())
+    except Exception:
+        return {}
+    params = dict(data.get("champion", {}))
+    params.pop("search_time_ms", None)
+    return params
+
+
+BEST_PARAMS = _load_champion()
 _CURRENT_PARAMS = BEST_PARAMS.copy()
+_SEARCH_TIME_MS = 2000
 
 
 def set_hyperparameters(**kwargs):
     """Update global hyperparameters and clear the engine cache.
 
-    This function is used by tuning harnesses to ensure fresh engines are
-    created with the requested parameters.
+    ``search_time_ms`` is a runtime knob (not an engine hyperparameter) that
+    caps per-turn native search time. It lets tuning harnesses and local smoke
+    tests trade strength for wall-clock speed; the Kaggle submission keeps the
+    full budget.
     """
 
-    global _CURRENT_PARAMS, _ENGINES
+    global _CURRENT_PARAMS, _ENGINES, _SEARCH_TIME_MS
+    if "search_time_ms" in kwargs:
+        _SEARCH_TIME_MS = int(kwargs.pop("search_time_ms"))
     _CURRENT_PARAMS.update(kwargs)
     _ENGINES.clear()
 
@@ -111,6 +116,7 @@ def _ensure_native_engine():
         sources = list(src_dir.glob("*.cpp"))
         cmd = [
             "g++", "-O3", "-shared", "-std=c++20", "-fPIC",
+            f"-I{src_dir}/include",
             f"-I{src_dir}",
             *subprocess.check_output([sys.executable, "-m", "pybind11", "--includes"]).decode().split(),
             *[str(s) for s in sources],
@@ -171,7 +177,7 @@ def agent(obs, config):
         int(_get(obs, "northBound", 19)),
         step,
     )
-    return engine.choose_actions(2000, seed=(step + 1) * 1315423911 + player)
+    return engine.choose_actions(_SEARCH_TIME_MS, seed=(step + 1) * 1315423911 + player)
 
 
 if __name__ == "__main__":
