@@ -1,15 +1,5 @@
 #include "crawler_engine_internal.hpp"
 
-/**
- * @file crawler_engine_policy.cpp
- * @brief Deterministic rollout policy, Bitboard pathfinding, and MacroAction translation.
- *
- * This module supplies the baseline plan used outside search, the rollout policy
- * used inside ISMCTS, and the macro-to-primitive translator used by tree edges.
- * It mirrors the strategic shape of `opponents/baseline.py` while keeping every scratch
- * structure in fixed arrays so Rollouts stay allocation-free.
- */
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -793,33 +783,6 @@ Action factory_advance_action(const BoardState& state, int robot_index, const Bi
 }  // namespace
 
 /**
- * @brief Compute the deterministic baseline action for the engine player.
- * @param robot_index Simulator-local robot slot.
- * @return Primitive action for that robot, or idle.
- */
-Action CrawlerSim::heuristic_action_for(int robot_index) const {
-    return heuristic_action_for_owner(robot_index, state.player);
-}
-
-/**
- * @brief Compute the deterministic baseline action for a specified owner.
- * @param robot_index Simulator-local robot slot.
- * @param for_owner Player whose policy controls the slot.
- * @return Primitive action for that robot, or idle.
- */
-Action CrawlerSim::heuristic_action_for_owner(int robot_index, int for_owner) const {
-    if (robot_index < 0 || robot_index >= state.robots.used ||
-        state.robots.alive[static_cast<size_t>(robot_index)] == 0 ||
-        state.robots.owner[static_cast<size_t>(robot_index)] != for_owner) {
-        return ACT_IDLE;
-    }
-    PrimitiveActions actions{};
-    actions.clear();
-    fill_heuristic_plan_for_owner(for_owner, actions, nullptr);
-    return actions.actions[static_cast<size_t>(robot_index)];
-}
-
-/**
  * @brief Fill the deterministic baseline joint plan for one owner.
  * @param owner Player index.
  * @param actions Mutable primitive action buffer.
@@ -871,10 +834,40 @@ void CrawlerSim::fill_heuristic_plan_for_owner(int owner, PrimitiveActions& acti
         }
 
         if (action == ACT_IDLE && fr - state.south_bound <= 3 && state.south_bound > 0 &&
+            state.robots.move_cd[static_cast<size_t>(factory)] == 0 &&
             state.robots.jump_cd[static_cast<size_t>(factory)] == 0 &&
             can_jump_policy(state, fc, fr, DIR_NORTH)) {
             action = ACT_JUMP_NORTH;
             macro = MACRO_FACTORY_JUMP_OBSTACLE;
+        }
+
+        /* Harvest a friendly mine before the scroll crushes it: the mine's
+         * energy is only value once a unit stands on it and drains it. */
+        if (action == ACT_IDLE && fr - state.south_bound <= 10) {
+            int best_mine = -1;
+            int best_dist = 999;
+            for (int rr = state.south_bound; rr <= state.north_bound; ++rr) {
+                for (int cc = 0; cc < WIDTH; ++cc) {
+                    const int m_idx = state.abs_index(cc, rr);
+                    if (m_idx < 0 || state.mine_owner[static_cast<size_t>(m_idx)] != owner ||
+                        state.mine_energy[static_cast<size_t>(m_idx)] <= 0) {
+                        continue;
+                    }
+                    const int dist = std::abs(fc - cc) + std::abs(fr - rr);
+                    if (dist <= 8 && dist < best_dist) {
+                        best_dist = dist;
+                        best_mine = m_idx;
+                    }
+                }
+            }
+            if (best_mine >= 0) {
+                const BitBoard goals = single_goal(state, detail::cell_col(best_mine), detail::cell_row(best_mine));
+                action = get_path_policy(state, fc, fr, goals, occupied_enemy, 12,
+                                         state.robots.jump_cd[static_cast<size_t>(factory)]);
+                if (action != ACT_IDLE) {
+                    macro = MACRO_FACTORY_SAFE_ADVANCE;
+                }
+            }
         }
 
         if (action == ACT_IDLE && state.robots.move_cd[static_cast<size_t>(factory)] <= 1) {
@@ -901,7 +894,16 @@ void CrawlerSim::fill_heuristic_plan_for_owner(int owner, PrimitiveActions& acti
         if (action == ACT_IDLE && state.robots.build_cd[static_cast<size_t>(factory)] == 0 &&
             fr + 1 <= state.north_bound && (policy_wall_at(state, fc, fr) & WALL_N) == 0 &&
             !friendly_cell_occupied(state, owner, fc, fr + 1)) {
-            if (worker_count < 2 && can_pay_after_drain(fe, WORKER_COST)) {
+            const int node_cell = nearest_mining_node_cell(state, factory);
+            const int node_dist = node_cell >= 0
+                                      ? std::abs(fc - detail::cell_col(node_cell)) +
+                                            std::abs(fr - detail::cell_row(node_cell))
+                                      : 999;
+            if (miner_count < 1 && node_cell >= 0 && node_dist <= 24 &&
+                can_pay_after_drain(fe, MINER_COST + 200)) {
+                action = ACT_BUILD_MINER;
+                macro = MACRO_FACTORY_BUILD_MINER;
+            } else if (worker_count < 2 && can_pay_after_drain(fe, WORKER_COST)) {
                 action = ACT_BUILD_WORKER;
                 macro = MACRO_FACTORY_BUILD_WORKER;
             } else if (scout_count < 1 && fe >= SCOUT_COST + 300 + ENERGY_PER_TURN) {
@@ -1022,9 +1024,19 @@ void CrawlerSim::fill_heuristic_plan_for_owner(int owner, PrimitiveActions& acti
             action = ACT_TRANSFORM;
             macro = MACRO_MINER_TRANSFORM;
         } else {
-            action = best_passable_direction(state, miner);
-            if (action != ACT_IDLE) {
-                macro = MACRO_MINER_SEEK_NODE;
+            const int node = nearest_mining_node_cell(state, miner);
+            if (node >= 0) {
+                const BitBoard goals = single_goal(state, detail::cell_col(node), detail::cell_row(node));
+                action = get_path_policy(state, c, r, goals, occupied_enemy, 25, NO_JUMP_PATH_CD);
+                if (action != ACT_IDLE) {
+                    macro = MACRO_MINER_SEEK_NODE;
+                }
+            }
+            if (action == ACT_IDLE) {
+                action = best_passable_direction(state, miner);
+                if (action != ACT_IDLE) {
+                    macro = MACRO_MINER_SEEK_NODE;
+                }
             }
         }
         actions.actions[static_cast<size_t>(miner)] = action;
@@ -1135,7 +1147,8 @@ Action CrawlerSim::primitive_for_macro(int robot_index, MacroAction macro) const
             }
             break;
         case MACRO_FACTORY_JUMP_OBSTACLE:
-            if (type == FACTORY && state.robots.jump_cd[static_cast<size_t>(robot_index)] == 0 &&
+            if (type == FACTORY && state.robots.move_cd[static_cast<size_t>(robot_index)] == 0 &&
+                state.robots.jump_cd[static_cast<size_t>(robot_index)] == 0 &&
                 can_jump_policy(state, c, r, DIR_NORTH)) {
                 return ACT_JUMP_NORTH;
             }
@@ -1233,3 +1246,4 @@ Action CrawlerSim::primitive_for_macro(int robot_index, MacroAction macro) const
 }
 
 }  // namespace crawler
+

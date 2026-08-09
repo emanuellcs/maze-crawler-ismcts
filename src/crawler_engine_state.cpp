@@ -1,16 +1,5 @@
 #include "crawler_engine_internal.hpp"
 
-/**
- * @file crawler_engine_state.cpp
- * @brief Fixed-buffer state containers, Bitboards, and primitive action helpers.
- *
- * This module implements the low-level data structures copied and rebuilt by
- * every ISMCTS Determinization and Rollout.  The functions are intentionally
- * small, branch-light, and allocation-free: robot slots live in a Structure of
- * Arrays, active tactical facts live in Bitboards, and action buffers are fixed
- * arrays indexed by simulator-local robot slot.
- */
-
 #include <algorithm>
 #include <bit>
 #include <cstdio>
@@ -74,20 +63,6 @@ bool BitBoard::any() const {
         }
     }
     return false;
-}
-
-/**
- * @brief Pop the least significant set bit from a word.
- * @param bits Word that must contain at least one set bit.
- * @return Offset of the popped bit.
- *
- * `bits &= bits - 1` clears the lowest set bit in constant time.  This idiom
- * supports fast iteration over Bitboards without scanning all 64 positions.
- */
-int pop_lsb(uint64_t& bits) {
-    const int offset = static_cast<int>(std::countr_zero(bits));
-    bits &= bits - 1ULL;
-    return offset;
 }
 
 /**
@@ -652,3 +627,4 @@ void ActionResult::add(std::string_view uid_value, Action primitive) {
 }
 
 }  // namespace crawler
+

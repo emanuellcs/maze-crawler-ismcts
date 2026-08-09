@@ -1,16 +1,5 @@
 #include "crawler_engine_internal.hpp"
 
-/**
- * @file crawler_engine_sim.cpp
- * @brief Exact deterministic Maze Crawler rule engine used by ISMCTS Rollouts.
- *
- * CrawlerSim::step() is the mission-critical hot path: every ISMCTS iteration
- * repeatedly advances sampled Determinizations through the same phase order as
- * the Kaggle environment.  All scratch state is fixed-size `std::array` storage,
- * which preserves zero-allocation Rollouts and makes behavior reproducible under
- * strict per-turn time budgets.
- */
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -49,7 +38,7 @@ void compute_rewards(BoardState& state) {
 
     const bool dead0 = factory_count[0] == 0;
     const bool dead1 = factory_count[1] == 0;
-    if (!dead0 && !dead1 && state.step + 1 < EPISODE_STEPS) {
+    if (!dead0 && !dead1 && state.step + 2 < EPISODE_STEPS) {
         state.reward0 = static_cast<float>(energy[0]);
         state.reward1 = static_cast<float>(energy[1]);
         return;
@@ -681,3 +670,4 @@ void CrawlerSim::step(const PrimitiveActions& input_actions) {
 }
 
 }  // namespace crawler
+

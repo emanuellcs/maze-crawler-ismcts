@@ -1,16 +1,5 @@
 #include "crawler_engine_internal.hpp"
 
-/**
- * @file crawler_engine_belief.cpp
- * @brief Player-centric fog-of-war memory and hidden-state Determinization.
- *
- * The Belief State is the information-set boundary of the engine.  It preserves
- * facts that the rules allow the player to remember, clears facts that vanish
- * outside vision, diffuses hidden enemy probability fields through plausible
- * motion, and samples concrete BoardState instances for ISMCTS Rollouts.  It
- * deliberately contains no turn-resolution mechanics; CrawlerSim owns the rules.
- */
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,6 +8,12 @@ namespace crawler {
 namespace {
 
 constexpr float EPS = 1.0e-6F;
+
+/// @brief Cap on per-observation enemy diffusion steps (guards large step gaps).
+constexpr int MAX_DIFFUSION_RADIUS = 24;
+
+/// @brief Maximum hidden enemies sampled per type in one determinization.
+constexpr int MAX_HIDDEN_ENEMIES_PER_TYPE = 3;
 
 /**
  * @brief Test whether enemy probability mass may diffuse through an edge.
@@ -59,7 +54,8 @@ bool can_diffuse_through(const BeliefState& belief, int c, int r, Direction dire
  */
 void diffuse_enemy_type(BeliefState& belief, int type, int elapsed) {
     const int period = move_period(static_cast<uint8_t>(type));
-    const int radius = (type == SCOUT) ? elapsed : ((elapsed + period - 1) / period);
+    const int radius = std::min(MAX_DIFFUSION_RADIUS,
+                                (type == SCOUT) ? elapsed : ((elapsed + period - 1) / period));
     if (radius <= 0) {
         return;
     }
@@ -272,28 +268,49 @@ BoardState BeliefState::determinize(uint64_t seed) const {
 
     const int enemy_owner = 1 - player;
     for (int type = FACTORY; type <= MINER; ++type) {
+        /* Hidden-enemy mass is sampled only from cells outside the player's
+         * current vision and inside the active window.  Visible enemy cells
+         * hold collapsed delta mass and their robots are re-inserted exactly
+         * by Engine::determinize; sampling them here would duplicate every
+         * visible enemy in the sampled world.  The field's total mass is an
+         * expected-count estimate, so several independent draws can model
+         * multiple hidden enemies of the same type. */
         float total = 0.0F;
-        for (float p : enemy_prob[static_cast<size_t>(type)]) {
-            total += p;
+        for (int idx = 0; idx < MAX_CELLS; ++idx) {
+            const int row = detail::cell_row(idx);
+            if (currently_visible[static_cast<size_t>(idx)] != 0 ||
+                row < south_bound || row > north_bound) {
+                continue;
+            }
+            total += enemy_prob[static_cast<size_t>(type)][static_cast<size_t>(idx)];
         }
         if (total <= 0.05F) {
             continue;
         }
-        float draw = (static_cast<float>(detail::next_u32(result.rng_state) % 100000U) / 100000.0F) * total;
-        int selected = -1;
-        for (int idx = 0; idx < MAX_CELLS; ++idx) {
-            draw -= enemy_prob[static_cast<size_t>(type)][static_cast<size_t>(idx)];
-            if (draw <= 0.0F) {
-                selected = idx;
-                break;
+        const int draws = std::min<int>(MAX_HIDDEN_ENEMIES_PER_TYPE,
+                                        std::max(1, static_cast<int>(std::lround(total))));
+        for (int draw_n = 0; draw_n < draws; ++draw_n) {
+            float draw = (static_cast<float>(detail::next_u32(result.rng_state) % 100000U) / 100000.0F) * total;
+            int selected = -1;
+            for (int idx = 0; idx < MAX_CELLS; ++idx) {
+                const int row = detail::cell_row(idx);
+                if (currently_visible[static_cast<size_t>(idx)] != 0 ||
+                    row < south_bound || row > north_bound) {
+                    continue;
+                }
+                draw -= enemy_prob[static_cast<size_t>(type)][static_cast<size_t>(idx)];
+                if (draw <= 0.0F) {
+                    selected = idx;
+                    break;
+                }
             }
-        }
-        if (selected >= 0) {
-            /* Synthetic UIDs are sufficient for hidden enemies because controlled plans are UID-keyed to observed robots. */
-            const int slot = result.robots.add_generated_robot(
-                result.next_generated_uid++, static_cast<uint8_t>(type), static_cast<uint8_t>(enemy_owner),
-                detail::cell_col(selected), detail::cell_row(selected), max_energy(static_cast<uint8_t>(type)) / 2);
-            (void)slot;
+            if (selected >= 0) {
+                /* Synthetic UIDs are sufficient for hidden enemies because controlled plans are UID-keyed to observed robots. */
+                const int slot = result.robots.add_generated_robot(
+                    result.next_generated_uid++, static_cast<uint8_t>(type), static_cast<uint8_t>(enemy_owner),
+                    detail::cell_col(selected), detail::cell_row(selected), max_energy(static_cast<uint8_t>(type)) / 2);
+                (void)slot;
+            }
         }
     }
 
@@ -302,3 +319,4 @@ BoardState BeliefState::determinize(uint64_t seed) const {
 }
 
 }  // namespace crawler
+
