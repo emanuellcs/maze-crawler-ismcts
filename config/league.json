@@ -1,0 +1,11 @@
+{
+  "opponents": [
+    {
+      "name": "baseline",
+      "kind": "handcrafted",
+      "params": {},
+      "rating": 1500.0,
+      "note": "Deterministic Python benchmark opponent."
+    }
+  ]
+}
